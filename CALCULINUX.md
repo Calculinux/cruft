@@ -17,6 +17,8 @@ Calculinux yaft fork. Linux `/dev/fb0` only; no BSD/X11 ports.
 `SIGUSR2` only flips `vt_active` (async-signal-safe). The main loop calls
 `term_release_transient` then `sigsuspend` so sixel decode cannot UAF on `free`.
 Cell sixel pixmaps are kept for redraw after the next `SIGUSR1`.
+`sigsuspend` deliberately allows `SIGTERM`/`SIGINT`/`SIGCHLD` so `systemctl stop`
+can restart inactive VTs when changing `CONSOLE_FONT` (otherwise only tty1 updated).
 
 ## Build / test
 

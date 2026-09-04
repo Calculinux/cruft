@@ -23,6 +23,10 @@ void sig_handler(int signo)
 	if (signo == SIGCHLD) {
 		child_alive = false;
 		wait(NULL);
+	} else if (signo == SIGTERM || signo == SIGINT) {
+		/* Unblock stop/restart: exit main loop so tty_die restores KD_TEXT. */
+		child_alive = false;
+		vt_active = true; /* wake sigsuspend path */
 	} else if (signo == SIGUSR1) { /* vt activate */
 		vt_active   = true;
 		need_redraw = true;
@@ -59,6 +63,8 @@ bool tty_init(struct termios *termios_orig)
 	sigact.sa_handler = sig_handler;
 	sigact.sa_flags   = SA_RESTART;
 	esigaction(SIGCHLD, &sigact, NULL);
+	esigaction(SIGTERM, &sigact, NULL);
+	esigaction(SIGINT, &sigact, NULL);
 
 	if (VT_CONTROL) {
 		esigaction(SIGUSR1, &sigact, NULL);
@@ -96,6 +102,8 @@ void tty_die(struct termios *termios_orig)
 	memset(&sigact, 0, sizeof(struct sigaction));
 	sigact.sa_handler = SIG_DFL;
 	sigaction(SIGCHLD, &sigact, NULL);
+	sigaction(SIGTERM, &sigact, NULL);
+	sigaction(SIGINT, &sigact, NULL);
 
 	if (VT_CONTROL) {
 		sigaction(SIGUSR1, &sigact, NULL);
@@ -192,6 +200,9 @@ int main(int argc, char *const argv[])
 		goto tty_init_failed;
 	}
 	child_alive = true;
+	/* Paint erased cells immediately; don't wait for the child to speak
+	 * (otherwise a post-restart FB left in KD_GRAPHICS looks blank). */
+	need_redraw = true;
 
 	/* main loop */
 	while (child_alive) {
@@ -202,7 +213,13 @@ int main(int argc, char *const argv[])
 
 			term_release_transient(&term);
 			sigfillset(&sigset);
+			/* Allow stop/restart and child exit to interrupt the wait.
+			 * Blocking SIGTERM here made systemctl stop hang on inactive
+			 * VTs (until SIGKILL), so font changes only hit tty1. */
 			sigdelset(&sigset, SIGUSR1);
+			sigdelset(&sigset, SIGTERM);
+			sigdelset(&sigset, SIGINT);
+			sigdelset(&sigset, SIGCHLD);
 			sigsuspend(&sigset);
 			continue;
 		}

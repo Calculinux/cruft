@@ -146,6 +146,7 @@ int glyph_mmap_init(const char *path)
 		glyph_mmap_die();
 		return 0;
 	}
+	fprintf(stderr, "cruft: font %s (%dx%d)\n", path, g_cell_w, g_cell_h);
 	return 1;
 }
 

@@ -85,7 +85,7 @@ static void write_u16(FILE *fp, uint16_t v)
 	fwrite(b, 1, 2, fp);
 }
 
-/* Build a tiny CRUFTFNT1 with space, '?', and U+3000 at 4x8 */
+/* Build a tiny CRUFTFN1 with space, '?', and U+3000 at 4x8 */
 static int write_tiny_font(const char *path)
 {
 	FILE *fp;
@@ -96,7 +96,7 @@ static int write_tiny_font(const char *path)
 	if (!fp)
 		return -1;
 
-	fwrite("CRUFTFNT1", 1, 8, fp);
+	fwrite("CRUFTFN1", 1, 8, fp);
 	write_u32(fp, 4);
 	write_u32(fp, 8);
 	write_u32(fp, rec);
@@ -202,7 +202,7 @@ int main(void)
 	drcs_clear_all(&term);
 	expect(term.drcs[1] == NULL && term.drcs[2] == NULL, "D drcs clear all");
 
-	/* E: CRUFTFNT1 mmap */
+	/* E: CRUFTFN1 mmap */
 	fd = mkstemp(tmpl);
 	expect(fd >= 0, "E mkstemp");
 	if (fd >= 0) {

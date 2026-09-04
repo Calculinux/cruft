@@ -9,7 +9,7 @@ Calculinux yaft fork. Linux `/dev/fb0` only; no BSD/X11 ports.
 - Sparse cell sixel pixmaps (heap block per cell, not inline array)
 - Lazy DRCS charset tables and lazy sixel canvas
 - Optional FB shadow buffer only when `CRUFT=wall` / `YAFT=wall`
-- Paged `CRUFTFNT1` fonts (`tools/mkcruftfont`, default `/usr/share/cruft/console.cruftfont`)
+- Paged `CRUFTFN1` fonts (`tools/mkcruftfont`, default `/usr/share/cruft/console.cruftfont`)
 - VT deactivate (`SIGUSR2`) releases the sixel canvas via `term_release_transient`
 
 ## Build / test

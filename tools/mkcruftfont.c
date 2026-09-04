@@ -2,7 +2,7 @@
  * Build demand-paged cruft .cruftfont blobs from BDF layers or GNU Unifont hex.
  *
  * File layout (little-endian):
- *   magic[8]         "CRUFTFNT1"
+ *   magic[8]         "CRUFTFN1"
  *   uint32 cell_w, cell_h, glyph_bytes, page_shift (must be 8)
  *   uint32 page_off[256]   — 0 empty, else file offset of uint32[256] subtable
  *   page tables + glyph records: uint32 code; uint8 width; uint8 pad[3]; uint16 bitmap[cell_h]
@@ -21,7 +21,7 @@
 
 #define UCS2_CHARS 0x10000
 #define GLYPH_MAX_H 16
-#define MAGIC "CRUFTFNT1"
+#define MAGIC "CRUFTFN1"
 #define PAGE_SHIFT 8
 #define PAGE_COUNT 256
 #define PAGE_MASK  (PAGE_COUNT - 1)

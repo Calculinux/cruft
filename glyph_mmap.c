@@ -1,4 +1,4 @@
-/* Demand-paged cruft font loader (CRUFTFNT1; see tools/mkcruftfont.c). */
+/* Demand-paged cruft font loader (CRUFTFN1; see tools/mkcruftfont.c). */
 #define _XOPEN_SOURCE 600
 #include <errno.h>
 #include <fcntl.h>
@@ -14,7 +14,7 @@
 #include "glyph.h"
 
 #define UCS2_CHARS 0x10000
-#define CRUFTFONT_MAGIC "CRUFTFNT1"
+#define CRUFTFONT_MAGIC "CRUFTFN1"
 #define DEFAULT_FONT_PATH "/usr/share/cruft/console.cruftfont"
 #define PAGE_SHIFT_EXPECT 8
 #define PAGE_COUNT 256

@@ -1,0 +1,8 @@
+yaft
+yaftx
+cruft
+mkcruftfont
+tests/selftest
+tests/selftest-asan
+*.o
+*.cruftfont

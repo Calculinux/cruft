@@ -1,0 +1,39 @@
+.TH "CRUFT" "1" "September 2026" "cruft" "cruft User Manual"
+.SH NAME
+.PP
+cruft \- Calculinux reduced footprint framebuffer terminal
+.SH SYNOPSIS
+.PP
+.B cruft
+.RB [ command ]
+.SH DESCRIPTION
+.PP
+.B cruft
+is a Linux framebuffer terminal emulator derived from yaft, tuned for
+low memory on Calculinux devices.
+.SH CUSTOMIZATION
+.PP
+Rewrite conf.h before make.
+.SH ENVIRONMENT VARIABLES
+.TP
+.B FRAMEBUFFER
+Specify framebuffer device (default /dev/fb0).
+.TP
+.B CRUFT_FONT
+Path to a CRUFTFNT1 font blob (default /usr/share/cruft/console.cruftfont).
+.B YAFT_FONT
+is accepted as an alias.
+.TP
+.B CRUFT
+If this variable includes "wall", cruft enables wallpaper mode and a
+framebuffer shadow buffer. See cruft_wall. \fBYAFT=wall\fR is also accepted.
+.SH AUTHOR
+.PP
+Calculinux fork; upstream yaft by haru <uobikiemukot at gmail dot com>
+.SH LICENSE
+.PP
+MIT LICENSE
+.SH SEE ALSO
+.PP
+.BR console_codes (4),
+.BR terminfo (5)

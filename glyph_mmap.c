@@ -26,7 +26,7 @@ int g_cell_h;
 struct cruftfont_map {
 	uint8_t *map;
 	size_t size;
-	const uint32_t *page_off;
+	const uint8_t *page_dir; /* LE uint32[PAGE_COUNT] at map+24 */
 	uint32_t glyph_bytes;
 	uint32_t page_shift;
 	struct glyph_t tofu_half;
@@ -137,7 +137,7 @@ int glyph_mmap_init(const char *path)
 	g_cell_h = (int)cell_h;
 	gfont.glyph_bytes = glyph_bytes;
 	gfont.page_shift = page_shift;
-	gfont.page_off = (const uint32_t *)(p + 24);
+	gfont.page_dir = p + 24;
 	make_tofu(&gfont.tofu_half, 0x003F, 1);
 	make_tofu(&gfont.tofu_wide, 0x3000, 2);
 
@@ -163,7 +163,7 @@ const struct glyph_t *glyph_lookup(uint32_t code)
 	uint32_t page, idx, page_off, off;
 	const uint8_t *sub;
 
-	if (code >= UCS2_CHARS || !gfont.map || !gfont.page_off)
+	if (code >= UCS2_CHARS || !gfont.map || !gfont.page_dir)
 		return NULL;
 
 	page = code >> gfont.page_shift;
@@ -171,7 +171,7 @@ const struct glyph_t *glyph_lookup(uint32_t code)
 	if (page >= PAGE_COUNT)
 		return NULL;
 
-	page_off = gfont.page_off[page];
+	page_off = read_u32_le(gfont.page_dir + page * 4);
 	if (page_off == 0 || page_off + PAGE_COUNT * 4 > gfont.size)
 		return NULL;
 

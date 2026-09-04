@@ -404,8 +404,13 @@ void decdld_parse_data(char *start_buf, int start_char, struct glyph_t *chars)
 			~ (hex 7E) represents the binary value 11 1111.
 	*/
 	char *cp, *end_buf;
-	uint8_t char_num = start_char; /* start_char == 0 means SPACE(0x20) */
+	int char_num;
 	uint8_t bitmap, row = 0, column = 0;
+
+	/* start_char == 0 means SPACE(0x20); reject out-of-range Pcn */
+	if (drcs_clamp_char_index(start_char) < 0)
+		return;
+	char_num = start_char;
 
 	init_glyph(&chars[char_num]);
 	cp      = start_buf;
@@ -420,6 +425,8 @@ void decdld_parse_data(char *start_buf, int start_char, struct glyph_t *chars)
 			column++;
 		} else if (*cp == ';') {  /* next char */
 			row = column = 0;
+			if (drcs_clamp_char_index(char_num + 1) < 0)
+				break;
 			char_num++;
 			init_glyph(&chars[char_num]);
 		} else if (*cp == '/') {  /* sixel nl+cr */

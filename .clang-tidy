@@ -1,0 +1,10 @@
+---
+# Analyzer-focused; pedantic bugprone-* is too noisy for this codebase.
+Checks: >
+  -*,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -clang-analyzer-security.ArrayBound
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*'
+FormatStyle: none

@@ -11,11 +11,8 @@
 #include "ctrlseq/dcs.h"
 #include "parse.h"
 
-static struct terminal_t *g_term;
-
 void sig_handler(int signo)
 {
-	sigset_t sigset;
 	/* global */
 	extern volatile sig_atomic_t vt_active;
 	extern volatile sig_atomic_t child_alive;
@@ -31,18 +28,12 @@ void sig_handler(int signo)
 		need_redraw = true;
 		ioctl(STDIN_FILENO, VT_RELDISP, VT_ACKACQ);
 	} else if (signo == SIGUSR2) { /* vt deactivate */
+		/* Only async-signal-safe work here. Canvas free + sigsuspend
+		 * run in the main loop so sixel decode cannot UAF. */
 		vt_active = false;
 		ioctl(STDIN_FILENO, VT_RELDISP, 1);
-
-		if (BACKGROUND_DRAW) { /* update passive cursor */
+		if (BACKGROUND_DRAW)
 			need_redraw = true;
-		} else {               /* sleep until next vt switching */
-			if (g_term)
-				term_release_transient(g_term);
-			sigfillset(&sigset);
-			sigdelset(&sigset, SIGUSR1);
-			sigsuspend(&sigset);
-		}
 	}
 }
 
@@ -188,7 +179,6 @@ int main(int argc, char *const argv[])
 		logging(FATAL, "terminal initialize failed\n");
 		goto term_init_failed;
 	}
-	g_term = &term;
 
 	if (!tty_init(&termios_orig)) {
 		logging(FATAL, "tty initialize failed\n");
@@ -205,6 +195,18 @@ int main(int argc, char *const argv[])
 
 	/* main loop */
 	while (child_alive) {
+		/* VT deactivated: free transient heap, then sleep until SIGUSR1.
+		 * Must not free from the signal handler (not AS-safe; races parse). */
+		if (!vt_active && !BACKGROUND_DRAW) {
+			sigset_t sigset;
+
+			term_release_transient(&term);
+			sigfillset(&sigset);
+			sigdelset(&sigset, SIGUSR1);
+			sigsuspend(&sigset);
+			continue;
+		}
+
 		if (need_redraw) {
 			need_redraw = false;
 			cmap_update(fb.fd, fb.cmap); /* after VT switching, need to restore cmap (in 8bpp mode) */
@@ -232,7 +234,6 @@ int main(int argc, char *const argv[])
 	}
 
 	/* normal exit */
-	g_term = NULL;
 	tty_die(&termios_orig);
 	term_die(&term);
 	glyph_mmap_die();
@@ -241,7 +242,6 @@ int main(int argc, char *const argv[])
 
 	/* error exit */
 tty_init_failed:
-	g_term = NULL;
 	term_die(&term);
 term_init_failed:
 	glyph_mmap_die();

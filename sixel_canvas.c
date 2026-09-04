@@ -7,8 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* erase_cell / move_cursor / cr live in terminal.h / esc.h (unity from cruft.c). */
-void erase_cell(struct terminal_t *term, int y, int x);
+/* erase_cell / move_cursor / cr live in terminal_cell.c / terminal.h (unity from cruft.c). */
 void move_cursor(struct terminal_t *term, int y_offset, int x_offset);
 void cr(struct terminal_t *term);
 
@@ -47,15 +46,33 @@ void sixel_canvas_free(struct terminal_t *term)
 
 void term_release_transient(struct terminal_t *term)
 {
+	/* Canvas only: cell pixmaps stay so redraw after VT switch still shows sixels. */
 	if (!term)
 		return;
 	sixel_canvas_free(term);
+}
+
+/* Bytes to copy for one cell row from a canvas of term_width pixels (may be < CELL_WIDTH at right edge). */
+size_t sixel_cell_row_bytes(int cell_x, int term_width)
+{
+	int src_x, avail;
+
+	if (cell_x < 0 || term_width <= 0 || CELL_WIDTH <= 0)
+		return 0;
+	src_x = cell_x * CELL_WIDTH;
+	if (src_x >= term_width)
+		return 0;
+	avail = term_width - src_x;
+	if (avail > CELL_WIDTH)
+		avail = CELL_WIDTH;
+	return (size_t)avail * (size_t)BYTES_PER_PIXEL;
 }
 
 void reset_sixel(struct terminal_t *term, struct color_pair_t color_pair, int width, int height)
 {
 	struct sixel_canvas_t *sc;
 	int i;
+	size_t nbytes;
 
 	if (!term || sixel_canvas_ensure(term) < 0)
 		return;
@@ -64,13 +81,25 @@ void reset_sixel(struct terminal_t *term, struct color_pair_t color_pair, int wi
 	if (!sc->pixmap)
 		return;
 
-	memset(sc->pixmap, 0, (size_t)BYTES_PER_PIXEL * (size_t)width * (size_t)height);
+	/* Clamp clear to the allocated canvas (term metrics), not unchecked DCS attrs. */
+	if (width > term->width)
+		width = term->width;
+	if (height > term->height)
+		height = term->height;
+	if (width < 0)
+		width = 0;
+	if (height < 0)
+		height = 0;
+	nbytes = (size_t)BYTES_PER_PIXEL * (size_t)width * (size_t)height;
+	if (nbytes > (size_t)BYTES_PER_PIXEL * (size_t)term->width * (size_t)term->height)
+		nbytes = (size_t)BYTES_PER_PIXEL * (size_t)term->width * (size_t)term->height;
+	memset(sc->pixmap, 0, nbytes);
 
 	sc->width   = 1;
 	sc->height  = 6;
 	sc->point.x = 0;
 	sc->point.y = 0;
-	sc->line_length = BYTES_PER_PIXEL * width;
+	sc->line_length = BYTES_PER_PIXEL * term->width;
 	sc->color_index = 0;
 
 	/* 0 - 15: VT340 default color map */
@@ -93,6 +122,7 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 {
 	int y, x, h, cols, lines;
 	int src_offset, dst_offset;
+	size_t row_bytes, canvas_bytes;
 	struct cell_t *cellp;
 	uint8_t *dst;
 
@@ -108,8 +138,13 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 	if (cols + term->cursor.x > term->cols)
 		cols -= (cols + term->cursor.x - term->cols);
 
+	canvas_bytes = (size_t)BYTES_PER_PIXEL * (size_t)term->width * (size_t)term->height;
+
 	for (y = 0; y < lines; y++) {
 		for (x = 0; x < cols; x++) {
+			row_bytes = sixel_cell_row_bytes(x, term->width);
+			if (row_bytes == 0)
+				continue;
 			erase_cell(term, term->cursor.y, term->cursor.x + x);
 			cellp = &term->cells[term->cursor.y][term->cursor.x + x];
 			dst = cell_pixmap_ensure(cellp);
@@ -119,10 +154,10 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 				src_offset = (y * CELL_HEIGHT + h) * sc->line_length
 					+ (CELL_WIDTH * x) * BYTES_PER_PIXEL;
 				dst_offset = h * CELL_WIDTH * BYTES_PER_PIXEL;
-				if (src_offset >= BYTES_PER_PIXEL * term->width * term->height)
+				if (src_offset < 0 ||
+				    (size_t)src_offset + row_bytes > canvas_bytes)
 					break;
-				memcpy(dst + dst_offset, sc->pixmap + src_offset,
-					(size_t)CELL_WIDTH * BYTES_PER_PIXEL);
+				memcpy(dst + dst_offset, sc->pixmap + src_offset, row_bytes);
 			}
 		}
 		move_cursor(term, 1, 0);

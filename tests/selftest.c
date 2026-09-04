@@ -14,10 +14,8 @@
 #include "cruft.h"
 #include "conf.h"
 
-/* Provide color_list for reset_sixel if linked; tests don't call it */
 const uint32_t color_list[COLORS];
 
-/* Stubs required by modules when not linking the full terminal */
 const uint8_t attr_mask[] = {
 	0x00, 0x01, 0x00, 0x00,
 	0x02, 0x04, 0x00, 0x08,
@@ -36,11 +34,7 @@ const char *term_name = "cruft-256color";
 const char *fb_path = "/dev/fb0";
 const char *shell_cmd = "/bin/bash";
 
-/* sixel_copy2cell calls these; provide no-op stubs for the test binary */
-void erase_cell(struct terminal_t *term, int y, int x)
-{
-	(void)term; (void)y; (void)x;
-}
+/* sixel_copy2cell also calls these (scroll/CR not under test here) */
 void move_cursor(struct terminal_t *term, int y_offset, int x_offset)
 {
 	(void)term; (void)y_offset; (void)x_offset;
@@ -62,7 +56,6 @@ static void expect(int cond, const char *msg)
 	}
 }
 
-/* F: wallpaper env parsing (fb_draw_dest itself skipped — needs fb struct) */
 static int wall_env_wants_shadow(void)
 {
 	const char *c = getenv("CRUFT");
@@ -134,25 +127,64 @@ static int write_tiny_font(const char *path)
 	for (i = 0; i < 256; i++)
 		write_u32(fp, (i == 0) ? g_ideo : 0);
 
-	/* glyph: space */
 	write_u32(fp, 0x20);
 	fputc(1, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
 	for (i = 0; i < 8; i++)
 		write_u16(fp, 0);
 
-	/* glyph: '?' */
 	write_u32(fp, 0x3f);
 	fputc(1, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
 	for (i = 0; i < 8; i++)
 		write_u16(fp, (i == 0 || i == 7) ? 0x0f : 0x09);
 
-	/* glyph: U+3000 ideographic space (wide) */
 	write_u32(fp, 0x3000);
 	fputc(2, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
 	for (i = 0; i < 8; i++)
 		write_u16(fp, 0);
 
 	fclose(fp);
+	return 0;
+}
+
+static void free_term_cells(struct terminal_t *term)
+{
+	int i, j;
+
+	if (!term->cells)
+		return;
+	for (i = 0; i < term->lines; i++) {
+		if (term->cells[i]) {
+			for (j = 0; j < term->cols; j++)
+				cell_pixmap_clear(&term->cells[i][j]);
+			free(term->cells[i]);
+		}
+	}
+	free(term->cells);
+	term->cells = NULL;
+	free(term->line_dirty);
+	term->line_dirty = NULL;
+}
+
+static int alloc_term_grid(struct terminal_t *term, int width, int height)
+{
+	int i;
+
+	memset(term, 0, sizeof(*term));
+	term->width = width;
+	term->height = height;
+	term->cols = width / CELL_WIDTH;
+	term->lines = height / CELL_HEIGHT;
+	if (term->cols < 1 || term->lines < 1)
+		return -1;
+	term->line_dirty = calloc((size_t)term->lines, sizeof(bool));
+	term->cells = calloc((size_t)term->lines, sizeof(struct cell_t *));
+	if (!term->line_dirty || !term->cells)
+		return -1;
+	for (i = 0; i < term->lines; i++) {
+		term->cells[i] = calloc((size_t)term->cols, sizeof(struct cell_t));
+		if (!term->cells[i])
+			return -1;
+	}
 	return 0;
 }
 
@@ -163,6 +195,8 @@ int main(void)
 	char fontpath[64];
 	char tmpl[] = "/tmp/cruft-st-XXXXXX";
 	int fd;
+	size_t canvas_bytes;
+	uint8_t *lastpx;
 
 	failures = 0;
 	g_cell_w = 6;
@@ -220,7 +254,7 @@ int main(void)
 		unlink(fontpath);
 	}
 
-	/* F: skip fb_draw_dest (needs full fb); test wallpaper env helper */
+	/* F: wallpaper env helper */
 	unsetenv("CRUFT");
 	unsetenv("YAFT");
 	expect(wall_env_wants_shadow() == 0, "F no wall env");
@@ -230,17 +264,96 @@ int main(void)
 	setenv("YAFT", "wall", 1);
 	expect(wall_env_wants_shadow() == 1, "F YAFT=wall");
 	unsetenv("YAFT");
-	/* ponytail: fb_draw_dest covered by wallpaper env; full fb path needs /dev/fb0 */
 
-	/* G: term_release_transient clears sixel */
+	/* G: term_release_transient clears sixel canvas only */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	expect(alloc_term_grid(&term, 36, 24) == 0, "G alloc grid");
+	sixel_canvas_ensure(&term);
+	expect(cell_pixmap_ensure(&term.cells[0][0]) != NULL, "G cell pixmap");
+	term.cells[0][0].pixmap[0] = 0x5A;
+	term_release_transient(&term);
+	expect(term.sixel.pixmap == NULL, "G release frees canvas");
+	expect(term.cells[0][0].pixmap && term.cells[0][0].pixmap[0] == 0x5A,
+		"G release keeps cell pixmap");
+	free_term_cells(&term);
+
+	/* H: PicoCalc 320-wide / 6px cell edge clamp */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	expect(sixel_cell_row_bytes(0, 320) == 6 * 4, "H full first cell");
+	expect(sixel_cell_row_bytes(52, 320) == 6 * 4, "H full cell 52");
+	expect(sixel_cell_row_bytes(53, 320) == 2 * 4, "H partial last cell (2px)");
+	expect(sixel_cell_row_bytes(54, 320) == 0, "H past right edge");
+	expect(sixel_cell_row_bytes(-1, 320) == 0, "H negative cell");
+
+	/* I: DECDLD glyph index clamp */
+	expect(drcs_clamp_char_index(0) == 0, "I clamp 0");
+	expect(drcs_clamp_char_index(95) == 95, "I clamp 95");
+	expect(drcs_clamp_char_index(96) == -1, "I reject 96");
+	expect(drcs_clamp_char_index(-1) == -1, "I reject -1");
+	expect(drcs_clamp_char_index(255) == -1, "I reject 255");
+
+	/* J: copy_cell deep-copies pixmap (ICH/DCH ownership) */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	expect(alloc_term_grid(&term, 18, 12) == 0, "J alloc");
+	expect(cell_pixmap_ensure(&term.cells[0][0]) != NULL, "J ensure src");
+	term.cells[0][0].pixmap[0] = 0xC1;
+	term.cells[0][0].width = HALF;
+	term.cells[0][0].glyphp = glyph_get(DEFAULT_CHAR);
+	copy_cell(&term, 0, 1, 0, 0);
+	expect(term.cells[0][1].has_pixmap && term.cells[0][1].pixmap, "J dst has pixmap");
+	expect(term.cells[0][1].pixmap != term.cells[0][0].pixmap, "J deep copy");
+	expect(term.cells[0][1].pixmap[0] == 0xC1, "J content");
+	cell_pixmap_clear(&term.cells[0][0]);
+	expect(term.cells[0][1].pixmap[0] == 0xC1, "J src clear leaves dst");
+	free_term_cells(&term);
+
+	/* K: sixel_copy2cell must not read past canvas when cols is ceil(width/cw)
+	 * (PicoCalc-style 320%6!=0). Force cols=54 while width=320. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	memset(&term, 0, sizeof(term));
+	term.width = 320;
+	term.height = 24;
+	term.cols = 54; /* ceil(320/6); wider than width/CELL_WIDTH */
+	term.lines = 2;
+	term.line_dirty = calloc(2, sizeof(bool));
+	term.cells = calloc(2, sizeof(struct cell_t *));
+	expect(term.line_dirty && term.cells, "K meta");
+	term.cells[0] = calloc(54, sizeof(struct cell_t));
+	term.cells[1] = calloc(54, sizeof(struct cell_t));
+	expect(term.cells[0] && term.cells[1], "K rows");
+	expect(sixel_canvas_ensure(&term) == 0, "K canvas");
+	canvas_bytes = (size_t)term.width * (size_t)term.height * (size_t)BYTES_PER_PIXEL;
+	memset(term.sixel.pixmap, 0xA5, canvas_bytes);
+	term.sixel.width = 320;
+	term.sixel.height = 12;
+	term.sixel.line_length = BYTES_PER_PIXEL * term.width;
+	term.cursor.x = 0;
+	term.cursor.y = 0;
+	sixel_copy2cell(&term, &term.sixel); /* ASAN fails on OOB without row clamp */
+	expect(term.cells[0][53].has_pixmap && term.cells[0][53].pixmap,
+		"K partial right cell filled");
+	lastpx = term.cells[0][53].pixmap;
+	expect(lastpx[0] == 0xA5 && lastpx[4] == 0xA5, "K partial cell got 2px");
+	expect(lastpx[2 * 4] == 0, "K bytes past clipped width stay clear");
+	sixel_canvas_free(&term);
+	free_term_cells(&term);
+
+	/* L: main-loop VT release pattern (flag → free, not in handler) */
 	g_cell_w = 6;
 	g_cell_h = 12;
 	memset(&term, 0, sizeof(term));
 	term.width = 16;
 	term.height = 16;
+	vt_active = false;
 	sixel_canvas_ensure(&term);
-	term_release_transient(&term);
-	expect(term.sixel.pixmap == NULL, "G term_release_transient");
+	if (!vt_active) /* same predicate as cruft.c main loop */
+		term_release_transient(&term);
+	expect(term.sixel.pixmap == NULL, "L deferred release");
+	vt_active = true;
 
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);

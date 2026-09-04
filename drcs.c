@@ -6,6 +6,14 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/* -1 if idx is outside the 96-glyph DRCS charset; else idx. */
+int drcs_clamp_char_index(int idx)
+{
+	if (idx < 0 || idx >= GLYPHS_PER_CHARSET)
+		return -1;
+	return idx;
+}
+
 struct glyph_t *drcs_ensure(struct terminal_t *term, int charset)
 {
 	if (!term || charset < 0 || charset >= DRCS_CHARSETS)

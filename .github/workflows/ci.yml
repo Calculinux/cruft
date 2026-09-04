@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Compile (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang
+
+      - name: Build with -Werror
+        env:
+          CC: ${{ matrix.compiler }}
+          CFLAGS: -std=c99 -pedantic -Wall -Wextra -Werror -O2
+        run: make clean && make all
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Unit tests + mkcruftfont self-check
+        run: make clean && make test
+
+      - name: AddressSanitizer tests
+        run: |
+          sudo apt-get install -y libasan8
+          make test-asan
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang clang-tidy shellcheck cppcheck
+
+      - name: Compiler lint (-fsyntax-only -Werror)
+        run: make lint
+
+      - name: clang-tidy
+        run: make tidy
+
+      - name: cppcheck
+        run: make cppcheck
+
+      - name: shellcheck
+        run: make shellcheck

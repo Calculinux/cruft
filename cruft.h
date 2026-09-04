@@ -166,13 +166,19 @@ struct glyph_t *drcs_ensure(struct terminal_t *term, int charset);
 void drcs_clear_charset(struct terminal_t *term, int charset);
 void drcs_clear_all(struct terminal_t *term);
 const struct glyph_t *drcs_glyph(struct terminal_t *term, uint32_t code);
+int drcs_clamp_char_index(int idx);
 
 /* sixel_canvas.c */
 int sixel_canvas_ensure(struct terminal_t *term);
 void sixel_canvas_free(struct terminal_t *term);
 void term_release_transient(struct terminal_t *term);
+size_t sixel_cell_row_bytes(int cell_x, int term_width);
 void reset_sixel(struct terminal_t *term, struct color_pair_t color_pair, int width, int height);
 void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc);
+
+/* terminal cells (terminal_cell.c) */
+void erase_cell(struct terminal_t *term, int y, int x);
+void copy_cell(struct terminal_t *term, int dst_y, int dst_x, int src_y, int src_x);
 
 #ifndef CRUFT_NO_GLOBALS
 const uint8_t attr_mask[] = {

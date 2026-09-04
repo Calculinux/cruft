@@ -10,7 +10,13 @@ Calculinux yaft fork. Linux `/dev/fb0` only; no BSD/X11 ports.
 - Lazy DRCS charset tables and lazy sixel canvas
 - Optional FB shadow buffer only when `CRUFT=wall` / `YAFT=wall`
 - Paged `CRUFTFN1` fonts (`tools/mkcruftfont`, default `/usr/share/cruft/console.cruftfont`)
-- VT deactivate (`SIGUSR2`) releases the sixel canvas via `term_release_transient`
+- VT deactivate: main loop frees sixel canvas (not the signal handler); cell pixmaps kept for redraw
+
+## VT deactivate
+
+`SIGUSR2` only flips `vt_active` (async-signal-safe). The main loop calls
+`term_release_transient` then `sigsuspend` so sixel decode cannot UAF on `free`.
+Cell sixel pixmaps are kept for redraw after the next `SIGUSR1`.
 
 ## Build / test
 

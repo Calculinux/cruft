@@ -342,6 +342,7 @@ static int self_check(void)
 	struct glyph_table t816 = { .cell_w = 8, .cell_h = 16 };
 	struct glyph_disk g;
 	uint8_t raw[16];
+	int rc = 0;
 
 	if (glyph_record_bytes(8) != 24 || glyph_record_bytes(12) != 32 || glyph_record_bytes(16) != 40)
 		return 1;
@@ -355,27 +356,37 @@ static int self_check(void)
 	t48.have = calloc(UCS2_CHARS, sizeof(int));
 	t612.have = calloc(UCS2_CHARS, sizeof(int));
 	t816.have = calloc(UCS2_CHARS, sizeof(int));
-	if (!t48.have || !t612.have || !t816.have)
-		return 3;
+	if (!t48.have || !t612.have || !t816.have) {
+		rc = 3;
+		goto done;
+	}
 
 	tofu_box(&t48, &g, 0x3f, 1);
-	if (g.bitmap[0] != 0x0f)
-		return 4;
+	if (g.bitmap[0] != 0x0f) {
+		rc = 4;
+		goto done;
+	}
 
 	tofu_box(&t612, &g, 0x3f, 1);
-	if (g.bitmap[0] != 0x3f)
-		return 5;
+	if (g.bitmap[0] != 0x3f) {
+		rc = 5;
+		goto done;
+	}
 
 	tofu_box(&t816, &g, 0x3000, 2);
-	if (g.bitmap[0] != 0xffff)
-		return 6;
+	if (g.bitmap[0] != 0xffff) {
+		rc = 6;
+		goto done;
+	}
 
+	fprintf(stderr, "mkcruftfont: self-check ok (4x8=%zu B, 6x12=%zu B, 8x16=%zu B records)\n",
+		glyph_record_bytes(8), glyph_record_bytes(12), glyph_record_bytes(16));
+
+done:
 	free(t48.have);
 	free(t612.have);
 	free(t816.have);
-	fprintf(stderr, "mkcruftfont: self-check ok (4x8=%zu B, 6x12=%zu B, 8x16=%zu B records)\n",
-		glyph_record_bytes(8), glyph_record_bytes(12), glyph_record_bytes(16));
-	return 0;
+	return rc;
 }
 
 static int write_u32(FILE *fp, uint32_t v)

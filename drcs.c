@@ -52,13 +52,13 @@ const struct glyph_t *drcs_glyph(struct terminal_t *term, uint32_t code)
 		ESC ( SP <\xXX> <\xYY> ESC ( B
 		<===> U+10XXYY ( 0x40 <= 0xXX <=0x7E, 0x20 <= 0xYY <= 0x7F )
 	*/
-	int row, cell, charset;
+	int row, cell;
 
 	row  = (0xFF00 & code) >> 8;
 	cell = 0xFF & code;
 
 	if ((0x40 <= row && row <= 0x7E) && (0x20 <= cell && cell <= 0x7F)) {
-		charset = row - 0x40;
+		int charset = row - 0x40;
 		if (!term->drcs[charset])
 			return glyph_get(SUBSTITUTE_HALF);
 		return &term->drcs[charset][cell - 0x20];

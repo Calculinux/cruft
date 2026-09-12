@@ -19,7 +19,8 @@ void erase_cell(struct terminal_t *term, int y, int x)
 
 void copy_cell(struct terminal_t *term, int dst_y, int dst_x, int src_y, int src_x)
 {
-	struct cell_t *dst, *src;
+	struct cell_t *dst;
+	const struct cell_t *src;
 
 	dst = &term->cells[dst_y][dst_x];
 	src = &term->cells[src_y][src_x];

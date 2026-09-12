@@ -122,7 +122,7 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 {
 	int y, x, h, cols, lines;
 	int src_offset, dst_offset;
-	size_t row_bytes, canvas_bytes;
+	size_t canvas_bytes;
 	struct cell_t *cellp;
 	uint8_t *dst;
 
@@ -142,7 +142,7 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 
 	for (y = 0; y < lines; y++) {
 		for (x = 0; x < cols; x++) {
-			row_bytes = sixel_cell_row_bytes(x, term->width);
+			size_t row_bytes = sixel_cell_row_bytes(x, term->width);
 			if (row_bytes == 0)
 				continue;
 			erase_cell(term, term->cursor.y, term->cursor.x + x);

@@ -88,8 +88,6 @@ int glyph_mmap_init(const char *path)
 	if (!path || !path[0])
 		path = getenv("CRUFT_FONT");
 	if (!path || !path[0])
-		path = getenv("YAFT_FONT"); /* alias */
-	if (!path || !path[0])
 		path = DEFAULT_FONT_PATH;
 
 	fd = open(path, O_RDONLY);

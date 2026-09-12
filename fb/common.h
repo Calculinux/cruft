@@ -301,9 +301,8 @@ bool fb_init(struct framebuffer_t *fb)
 	if (VERBOSE)
 		fb_print_info(&fb->info);
 
-	/* wallpaper / shadow buffer only when CRUFT or YAFT env contains "wall" */
-	if (((env = getenv("CRUFT")) && strstr(env, "wall"))
-		|| ((env = getenv("YAFT")) && strstr(env, "wall")))
+	/* wallpaper / shadow buffer only when CRUFT env contains "wall" */
+	if ((env = getenv("CRUFT")) && strstr(env, "wall"))
 		want_wall = 1;
 
 	/* allocate memory */

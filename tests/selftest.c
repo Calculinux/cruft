@@ -59,9 +59,8 @@ static void expect(int cond, const char *msg)
 static int wall_env_wants_shadow(void)
 {
 	const char *c = getenv("CRUFT");
-	const char *y = getenv("YAFT");
 
-	return ((c && strstr(c, "wall")) || (y && strstr(y, "wall"))) ? 1 : 0;
+	return (c && strstr(c, "wall")) ? 1 : 0;
 }
 
 static void write_u32(FILE *fp, uint32_t v)
@@ -256,14 +255,10 @@ int main(void)
 
 	/* F: wallpaper env helper */
 	unsetenv("CRUFT");
-	unsetenv("YAFT");
 	expect(wall_env_wants_shadow() == 0, "F no wall env");
 	setenv("CRUFT", "wall", 1);
 	expect(wall_env_wants_shadow() == 1, "F CRUFT=wall");
 	unsetenv("CRUFT");
-	setenv("YAFT", "wall", 1);
-	expect(wall_env_wants_shadow() == 1, "F YAFT=wall");
-	unsetenv("YAFT");
 
 	/* G: term_release_transient clears sixel canvas only */
 	g_cell_w = 6;

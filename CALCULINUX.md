@@ -8,7 +8,7 @@ Calculinux yaft fork. Linux `/dev/fb0` only; no BSD/X11 ports.
 
 - Sparse cell sixel pixmaps (heap block per cell, not inline array)
 - Lazy DRCS charset tables and lazy sixel canvas
-- Optional FB shadow buffer only when `CRUFT=wall` / `YAFT=wall`
+- Optional FB shadow buffer only when `CRUFT=wall`
 - Paged `CRUFTFN1` fonts (`tools/mkcruftfont`, default `/usr/share/cruft/console.cruftfont`)
 - VT deactivate: main loop frees sixel canvas (not the signal handler); cell pixmaps kept for redraw
 
@@ -26,5 +26,5 @@ can restart inactive VTs when changing `CONSOLE_FONT` (otherwise only tty1 updat
 make clean && make && make test
 ```
 
-`CRUFT_FONT` selects the font blob (`YAFT_FONT` accepted as alias).
+`CRUFT_FONT` selects the font blob.
 `TERM` is `cruft-256color`.

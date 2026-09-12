@@ -29,6 +29,8 @@
 struct glyph_disk {
 	uint32_t code;
 	uint8_t width;
+	/* Disk record alignment (bitmap on 4-byte boundary); not read. */
+	// cppcheck-suppress unusedStructMember
 	uint8_t pad[3];
 	uint16_t bitmap[GLYPH_MAX_H];
 };
@@ -85,7 +87,7 @@ static size_t glyph_record_bytes(int cell_h)
 	return 8 + (size_t)cell_h * 2;
 }
 
-static void tofu_box(struct glyph_table *t, struct glyph_disk *g, uint32_t code, uint8_t width)
+static void tofu_box(const struct glyph_table *t, struct glyph_disk *g, uint32_t code, uint8_t width)
 {
 	int cw = t->cell_w;
 	int ch = t->cell_h;
@@ -344,6 +346,7 @@ static int self_check(void)
 	uint8_t raw[16];
 	int rc = 0;
 
+	// cppcheck-suppress knownConditionTrueFalse
 	if (glyph_record_bytes(8) != 24 || glyph_record_bytes(12) != 32 || glyph_record_bytes(16) != 40)
 		return 1;
 
@@ -391,14 +394,14 @@ done:
 
 static int write_u32(FILE *fp, uint32_t v)
 {
-	uint8_t b[4] = { v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff };
+	const uint8_t b[4] = { v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff };
 
 	return fwrite(b, 1, 4, fp) == 4 ? 0 : -1;
 }
 
 static int write_u16(FILE *fp, uint16_t v)
 {
-	uint8_t b[2] = { v & 0xff, (v >> 8) & 0xff };
+	const uint8_t b[2] = { v & 0xff, (v >> 8) & 0xff };
 
 	return fwrite(b, 1, 2, fp) == 2 ? 0 : -1;
 }
@@ -529,10 +532,6 @@ int main(int argc, char **argv)
 	}
 
 	hex_mode = (argc == 5 && strstr(argv[3], ".hex") != NULL);
-	if (!hex_mode && argc < 5) {
-		usage(argv[0]);
-		return 1;
-	}
 	if (hex_mode && !(t.cell_w == 8 && t.cell_h == 16)) {
 		fprintf(stderr, "Unifont hex import requires --cell 8x16\n");
 		return 1;

@@ -16,7 +16,7 @@
 #define UCS2_CHARS 0x10000
 #define CRUFTFONT_MAGIC "CRUFTFN1"
 #define DEFAULT_FONT_PATH "/usr/share/cruft/console.cruftfont"
-#define PAGE_SHIFT_EXPECT 8
+#define PAGE_SHIFT_EXPECT 8u
 #define PAGE_COUNT 256
 #define HEADER_MIN (8 + 16 + PAGE_COUNT * 4)
 
@@ -87,8 +87,6 @@ int glyph_mmap_init(const char *path)
 
 	if (!path || !path[0])
 		path = getenv("CRUFT_FONT");
-	if (!path || !path[0])
-		path = getenv("YAFT_FONT"); /* alias */
 	if (!path || !path[0])
 		path = DEFAULT_FONT_PATH;
 

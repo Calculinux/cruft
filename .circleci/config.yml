@@ -1,8 +1,0 @@
-# Obsolete upstream CircleCI (built yaft / yaftx). CI lives in GitHub Actions:
-#   .github/workflows/ci.yml
-# Kept empty so old CircleCI project settings do not run a broken config.
-version: 2.1
-workflows:
-  version: 2
-  noop:
-    jobs: []

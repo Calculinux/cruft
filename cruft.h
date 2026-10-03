@@ -62,6 +62,7 @@ enum char_attr {
 
 enum osc {
 	OSC_GWREPT = 8900, /* OSC Ps: mode number of cruft GWREPT */
+	OSC_DRAW_SUSPEND = 8901, /* OSC Ps: suspend/resume drawing to the framebuffer */
 };
 
 enum term_mode {
@@ -145,6 +146,8 @@ struct terminal_t {
 	struct esc_t esc;                        /* store escape sequence */
 	uint32_t virtual_palette[COLORS];        /* virtual color palette: always 32bpp */
 	bool palette_modified;                   /* true if palette changed by OSC 4/104 */
+	bool draw_suspended;                     /* OSC 8901: another process owns the framebuffer */
+	pid_t draw_suspend_pid;                  /* ...and drawing resumes when it is gone */
 	/* glyphs: demand-paged via glyph_get()/glyph_lookup() */
 	struct glyph_t *drcs[DRCS_CHARSETS];     /* lazy DRCS charset tables */
 	struct sixel_canvas_t sixel;

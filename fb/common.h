@@ -467,6 +467,10 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 
 void refresh(struct framebuffer_t *fb, struct terminal_t *term)
 {
+	/* OSC 8901: lines stay dirty and are repainted on resume */
+	if (term->draw_suspended)
+		return;
+
 	if (term->palette_modified) {
 		term->palette_modified = false;
 		for (int i = 0; i < COLORS; i++)

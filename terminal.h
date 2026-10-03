@@ -280,6 +280,13 @@ void redraw(struct terminal_t *term)
 		term->line_dirty[i] = true;
 }
 
+void resume_draw(struct terminal_t *term)
+{
+	term->draw_suspended   = false;
+	term->draw_suspend_pid = 0;
+	redraw(term); /* whoever had the framebuffer left anything on it */
+}
+
 void term_die(struct terminal_t *term)
 {
 	int i, j;
@@ -318,6 +325,9 @@ bool term_init(struct terminal_t *term, int width, int height)
 	term->lines = term->height / CELL_HEIGHT;
 
 	term->esc.size = ESCSEQ_SIZE;
+
+	term->draw_suspended   = false;
+	term->draw_suspend_pid = 0;
 
 	logging(DEBUG, "terminal cols:%d lines:%d\n", term->cols, term->lines);
 

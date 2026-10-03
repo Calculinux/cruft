@@ -186,6 +186,40 @@ void reset_palette(struct terminal_t *term, void *arg)
 	}
 }
 
+void draw_suspend(struct terminal_t *term, void *arg)
+{
+	/*
+	suspend drawing
+		OSC 8901 ; 1 ; Ppid ST
+			stop drawing to the framebuffer: process Ppid draws on it
+			itself (an fbdev app started from this terminal).
+			output is still parsed, only not shown.
+		OSC 8901 ; 0 ST
+			resume drawing and repaint the whole screen.
+		ST: BEL or ESC \
+
+	Ppid is required: drawing also resumes when that process is gone,
+	so an app that dies without cleaning up can't leave the terminal dark.
+	*/
+	struct parm_t *pt = (struct parm_t *) arg;
+	int argc = pt->argc, pid;
+	char **argv = pt->argv;
+
+	if (argc < 2)
+		return;
+
+	if (dec2num(argv[1]) == 0) {
+		if (term->draw_suspended)
+			resume_draw(term);
+	} else if (dec2num(argv[1]) == 1 && argc >= 3) {
+		pid = dec2num(argv[2]);
+		if (pid > 1) { /* never probe 0 (our group) or init */
+			term->draw_suspended   = true;
+			term->draw_suspend_pid = (pid_t) pid;
+		}
+	}
+}
+
 int isdigit_or_questionmark(int c)
 {
 	if (isdigit(c) || c == '?')

@@ -147,8 +147,10 @@ void osc_sequence(struct terminal_t *term, uint8_t ch)
 			set_palette(term, &parm);
 		else if (osc_mode == 104)
 			reset_palette(term, &parm);
-		if (osc_mode == 8900)
+		if (osc_mode == OSC_GWREPT)
 			glyph_width_report(term, &parm);
+		else if (osc_mode == OSC_DRAW_SUSPEND)
+			draw_suspend(term, &parm);
 	}
 	reset_esc(term);
 }

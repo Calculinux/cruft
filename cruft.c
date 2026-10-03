@@ -224,6 +224,14 @@ int main(int argc, char *const argv[])
 			continue;
 		}
 
+		/* The process drawing on the framebuffer (OSC 8901) went away
+		 * without resuming us: take the screen back. */
+		if (term.draw_suspended
+			&& kill(term.draw_suspend_pid, 0) < 0 && errno == ESRCH) {
+			resume_draw(&term);
+			need_redraw = true;
+		}
+
 		if (need_redraw) {
 			need_redraw = false;
 			cmap_update(fb.fd, fb.cmap); /* after VT switching, need to restore cmap (in 8bpp mode) */

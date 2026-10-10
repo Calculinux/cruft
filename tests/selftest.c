@@ -13,6 +13,8 @@
 #define CRUFT_NO_GLOBALS
 #include "cruft.h"
 #include "conf.h"
+#include "util.h"
+#include "fb/common.h"
 
 const uint32_t color_list[COLORS];
 
@@ -45,6 +47,26 @@ void cr(struct terminal_t *term)
 }
 
 static int failures;
+
+/* M-section fixtures: PicoCalc-style 320x320 framebuffer, 4bpp, truecolor */
+#define M_W 320
+#define M_H 320
+
+static uint32_t m_px_at(const uint8_t *fp, int x, int y)
+{
+	const int pos = (y * M_W + x) * 4;
+
+	return (uint32_t) fp[pos] | ((uint32_t) fp[pos + 1] << 8) |
+	       ((uint32_t) fp[pos + 2] << 16) | ((uint32_t) fp[pos + 3] << 24);
+}
+
+static void m_fill(uint8_t *p, uint32_t v, int npix)
+{
+	uint8_t b[4] = { v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff };
+
+	for (int i = 0; i < npix; i++)
+		memcpy(p + i * 4, b, 4);
+}
 
 static void expect(int cond, const char *msg)
 {
@@ -162,6 +184,75 @@ static void free_term_cells(struct terminal_t *term)
 	term->cells = NULL;
 	free(term->line_dirty);
 	term->line_dirty = NULL;
+}
+
+/* Build a tiny CRUFTFN1 with space, '?' (row0 = bits 0-4) and U+3000 at 6x12.
+ * Metrics validated by glyph_mmap_init (32-byte records). */
+static int write_tiny_font6x12(const char *path)
+{
+	FILE *fp;
+	uint32_t p0, p30, g_space, g_q, g_ideo, cursor, rec = 32;
+	int i;
+
+	fp = fopen(path, "wb");
+	if (!fp)
+		return -1;
+
+	fwrite("CRUFTFN1", 1, 8, fp);
+	write_u32(fp, 6);
+	write_u32(fp, 12);
+	write_u32(fp, rec);
+	write_u32(fp, 8);
+
+	cursor = 8 + 16 + 256 * 4;
+	p0 = cursor;
+	cursor += 256 * 4;
+	p30 = cursor;
+	cursor += 256 * 4;
+	g_space = cursor;
+	g_q = g_space + rec;
+	g_ideo = g_q + rec;
+
+	for (i = 0; i < 256; i++) {
+		uint32_t off = 0;
+
+		if (i == 0)
+			off = p0;
+		else if (i == 0x30)
+			off = p30;
+		write_u32(fp, off);
+	}
+
+	for (i = 0; i < 256; i++) {
+		uint32_t off = 0;
+
+		if (i == 0x20)
+			off = g_space;
+		else if (i == 0x3f)
+			off = g_q;
+		write_u32(fp, off);
+	}
+
+	for (i = 0; i < 256; i++)
+		write_u32(fp, (i == 0) ? g_ideo : 0);
+
+	write_u32(fp, 0x20);
+	fputc(1, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
+	for (i = 0; i < 12; i++)
+		write_u16(fp, 0);
+
+	write_u32(fp, 0x3f);
+	fputc(1, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
+	for (i = 0; i < 12; i++)
+		write_u16(fp, (i == 0) ? 0x1f: 0);
+
+	write_u32(fp, 0x3000);
+	fputc(2, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
+	for (i = 0; i < 12; i++)
+		write_u16(fp, 0);
+
+	fclose(fp);
+	return 0;
 }
 
 static int alloc_term_grid(struct terminal_t *term, int width, int height)
@@ -349,6 +440,150 @@ int main(void)
 		term_release_transient(&term);
 	expect(term.sixel.pixmap == NULL, "L deferred release");
 	vt_active = true;
+
+	/* M: centered grid, margin painting, sixel alignment (PicoCalc 320x320).
+	 * 6x12 font: cols=53 (grid 318px -> 1px left + 1px right margin),
+	 * lines=26 (grid 312px -> 8px bottom margin, rows top-anchored).
+	 * '?' glyph row0 = 0x1f (bits 0-4); bit 0 is the rightmost pixel. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		char tmfm[] = "/tmp/cruft-st-M-XXXXXX";
+		char mpfont[64];
+		int fdf = mkstemp(tmfm);
+
+		expect(fdf >= 0, "M mkstemp");
+		if (fdf >= 0) {
+			struct framebuffer_t fbm;
+			uint8_t *mfp;
+
+			close(fdf);
+			snprintf(mpfont, sizeof(mpfont), "%s.cruftfont", tmfm);
+			expect(write_tiny_font6x12(mpfont) == 0, "M write 6x12 font");
+			expect(glyph_mmap_init(mpfont) == 1, "M glyph_mmap_init 6x12");
+			unlink(mpfont);
+
+			memset(&term, 0, sizeof(term));
+			expect(alloc_term_grid(&term, M_W, M_H) == 0, "M alloc 53x26");
+			expect(term.cols == 53 && term.lines == 26, "M PicoCalc grid 53x26");
+
+			/* populate cells: row 0 bg=1 (distinct from margin color 0),
+			 * other rows bg=0; '?' marker at (0,5) */
+			for (int y = 0; y < term.lines; y++) {
+				for (int x = 0; x < term.cols; x++) {
+					struct cell_t *c = &term.cells[y][x];
+
+					c->glyphp = (y == 0 && x == 5) ? glyph_get(0x3f): glyph_get(0x20);
+					c->color_pair.fg = 7;
+					c->color_pair.bg = (y == 0) ? 1: 0;
+					c->width = HALF;
+				}
+				term.line_dirty[y] = true;
+			}
+			term.mode = MODE_AMRIGHT; /* no cursor: keep assertions plain */
+			term.palette_modified = false;
+			term.cursor.x = term.cursor.y = 0;
+
+			memset(&fbm, 0, sizeof(fbm));
+			mfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
+			expect(mfp != NULL, "M fp alloc");
+			if (mfp) {
+				m_fill(mfp, 0xEFEFEFEFu, M_W * M_H); /* sentinel: any unpainted pixel fails */
+				fbm.fp = mfp;
+				fbm.buf = NULL;
+				fbm.wall = NULL;
+				fbm.info.width = M_W;
+				fbm.info.height = M_H;
+				fbm.info.line_length = M_W * 4;
+				fbm.info.bytes_per_pixel = 4;
+				fbm.info.bits_per_pixel = 32;
+				fbm.info.type = YAFT_FB_TYPE_PACKED_PIXELS;
+				fbm.info.visual = YAFT_FB_VISUAL_TRUECOLOR;
+				fbm.info.red.length = 8;   fbm.info.red.offset = 16;
+				fbm.info.green.length = 8; fbm.info.green.offset = 8;
+				fbm.info.blue.length = 8;  fbm.info.blue.offset = 0;
+				for (int i = 0; i < COLORS; i++)
+					fbm.real_palette[i] = (uint32_t) i * 0x01010101u;
+
+				/* M1: full-frame check after one refresh()
+				 * margin / bottom strip:  palette[0] = 0
+				 * row 0 inside grid:      palette[1]
+				 * row 0, '?' bits 0-4:    palette[7] at x=36..32, y=0 */
+				refresh(&fbm, &term);
+				{
+					int mism = 0, first_bad = -1;
+					for (int y = 0; y < M_H; y++) {
+						for (int x = 0; x < M_W; x++) {
+							uint32_t exp = 0;
+
+							if (y < term.lines * CELL_HEIGHT && x >= 1 && x < 319) {
+								exp = (y < CELL_HEIGHT) ? 0x01010101u: 0;
+								if (y == 0 && x >= 32 && x <= 36)
+									exp = 0x07070707u;
+							}
+							if (m_px_at(mfp, x, y) != exp) {
+								mism++;
+								if (first_bad < 0)
+									first_bad = y * M_W + x;
+							}
+						}
+					}
+					expect(mism == 0, "M1 full-frame centered + margins painted");
+					if (mism)
+						fprintf(stderr, "  first mismatch at y=%d x=%d (count=%d)\n",
+							first_bad / M_W, first_bad % M_W, mism);
+				}
+
+				/* M2: sixel blit shares the text grid origin (ox=1) */
+				m_fill(mfp, 0xCDCDCDCDu, M_W * M_H);
+				{
+					uint8_t *pix = (uint8_t *) ecalloc(1,
+						(size_t) CELL_WIDTH * CELL_HEIGHT * BYTES_PER_PIXEL);
+					uint32_t want = color2pixel(&fbm.info, 0xA5A5A5A5u);
+
+					expect(pix != NULL, "M2 pix alloc");
+					if (pix) {
+						m_fill(pix, want, CELL_WIDTH * CELL_HEIGHT);
+						draw_sixel(&fbm, &term, 3, 2, pix);
+						expect(m_px_at(mfp, 1 + 2 * 6, 3 * 12) == want,
+							"M2 sixel first px at grid origin");
+						expect(m_px_at(mfp, 1 + 2 * 6 + 5, 3 * 12 + 11) == want,
+							"M2 sixel last px");
+						expect(m_px_at(mfp, 1 + 2 * 6 - 1, 3 * 12) == 0xCDCDCDCDu,
+							"M2 left neighbor untouched");
+						expect(m_px_at(mfp, 1 + 2 * 6 + 6, 3 * 12) == 0xCDCDCDCDu,
+							"M2 right neighbor untouched");
+					}
+					free(pix);
+				}
+
+				/* M3: right-edge sixel cell clips inside the grid (right margin spared) */
+				m_fill(mfp, 0xBB00BB00u, M_W * M_H);
+				{
+					uint8_t *pix = (uint8_t *) ecalloc(1,
+						(size_t) CELL_WIDTH * CELL_HEIGHT * BYTES_PER_PIXEL);
+					uint32_t want = color2pixel(&fbm.info, 0xA5A5A5A5u);
+
+					expect(pix != NULL, "M3 pix alloc");
+					if (pix) {
+						int edge_col = term.cols - 1;
+						int edge_x = 1 + edge_col * 6; /* = 313 */
+
+						m_fill(pix, want, CELL_WIDTH * CELL_HEIGHT);
+						draw_sixel(&fbm, &term, 0, edge_col, pix);
+						expect(m_px_at(mfp, edge_x, 0) == want, "M3 edge cell first px");
+						expect(m_px_at(mfp, 318, 11) == want, "M3 edge cell last px (x=318)");
+						for (int y = 0; y < CELL_HEIGHT; y++)
+							expect(m_px_at(mfp, 319, y) == 0xBB00BB00u, "M3 right margin untouched");
+					}
+					free(pix);
+				}
+			}
+			free_term_cells(&term);
+			free(mfp);
+			glyph_mmap_die();
+		}
+	}
 
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);

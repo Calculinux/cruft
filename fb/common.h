@@ -365,19 +365,96 @@ void fb_die(struct framebuffer_t *fb)
 	//fb_release(fb->fd, &fb->info); /* os specific */
 }
 
-static inline void draw_sixel(struct framebuffer_t *fb, int line, int col, uint8_t *pixmap)
+/*
+ * Grid is centered horizontally so the leftover (width - cols*CELL_WIDTH)
+ * pixels are split between the left and right edges. Rows stay
+ * top-anchored (oy = 0), matching kernel fbcon. The same offset must be
+ * applied to text (draw_line) and sixel blits (draw_sixel) or sixel
+ * content lands rem/2 px left of the adjacent glyphs.
+ */
+static inline int grid_origin_x(const struct terminal_t *term)
+{
+	return (term->width - term->cols * CELL_WIDTH) / 2;
+}
+
+/*
+ * Paint the pixels the cell grid never covers: left/right edge strips
+ * (width - cols*CELL_WIDTH, split around grid_origin_x) and the bottom
+ * strip (height - lines*CELL_HEIGHT). Contents: wallpaper when present,
+ * else the default background. Upstream yaft hid this by always flushing
+ * a zeroed full-screen shadow; direct-draw mode has no shadow, so the
+ * strips must be written explicitly or stale framebuffer contents
+ * (kernel boot log, previous VT) survive in them.
+ */
+static void fb_paint_margin(struct framebuffer_t *fb, struct terminal_t *term)
+{
+	int ox, grid_w, grid_h, x, y;
+	int rem_left, rem_right;
+	uint32_t bgpix = fb->real_palette[DEFAULT_BG];
+	uint8_t *dest = fb_draw_dest(fb);
+	int bpp = fb->info.bytes_per_pixel;
+	int ll = fb->info.line_length;
+
+	ox = grid_origin_x(term);
+	grid_w = term->cols * CELL_WIDTH;
+	grid_h = term->lines * CELL_HEIGHT;
+	rem_left = ox;
+	rem_right = term->width - ox - grid_w;
+	if (rem_left <= 0 && rem_right <= 0 && grid_h >= term->height)
+		return;
+
+	for (y = 0; y < term->height; y++) {
+		int bot_strip = (y >= grid_h);
+		int x_end;
+
+		if (bot_strip)
+			x_end = term->width;
+		else {
+			/* left strip only; right strip handled per-x below */
+			x_end = ox;
+		}
+		for (x = 0; x < x_end; x++) {
+			int pos = y * ll + x * bpp;
+			if (fb->wall)
+				memcpy(dest + pos, fb->wall + pos, bpp);
+			else
+				memcpy(dest + pos, &bgpix, bpp);
+		}
+		for (x = ox + grid_w; x < term->width; x++) {
+			int pos = y * ll + x * bpp;
+			if (fb->wall)
+				memcpy(dest + pos, fb->wall + pos, bpp);
+			else
+				memcpy(dest + pos, &bgpix, bpp);
+		}
+	}
+
+	/* Shadow mode: per-line blits only flush the grid rows, so copy the
+	 * bottom strip (if any) to the display ourselves. */
+	if (fb->buf && grid_h < term->height)
+		memcpy(fb->fp + (long)grid_h * ll, fb->buf + (long)grid_h * ll,
+			(long)(term->height - grid_h) * ll);
+}
+
+static inline void draw_sixel(struct framebuffer_t *fb, struct terminal_t *term, int line, int col, uint8_t *pixmap)
 {
 	int h, w, src_offset, dst_offset;
 	uint32_t pixel, color = 0;
 	uint8_t *dest = fb_draw_dest(fb);
+	int ox = grid_origin_x(term);
+	/* Clip the right-edge cell to the drawable area (valid cols never
+	 * exceed it, this is defensive). */
+	int avail = fb->info.width - ox - col * CELL_WIDTH;
+	if (avail > CELL_WIDTH)
+		avail = CELL_WIDTH;
 
 	for (h = 0; h < CELL_HEIGHT; h++) {
-		for (w = 0; w < CELL_WIDTH; w++) {
+		for (w = 0; w < avail; w++) {
 			src_offset = BYTES_PER_PIXEL * (h * CELL_WIDTH + w);
 			memcpy(&color, pixmap + src_offset, BYTES_PER_PIXEL);
 
 			dst_offset = (line * CELL_HEIGHT + h) * fb->info.line_length
-				+ (col * CELL_WIDTH + w) * fb->info.bytes_per_pixel;
+				+ (ox + col * CELL_WIDTH + w) * fb->info.bytes_per_pixel;
 			pixel = color2pixel(&fb->info, color);
 			memcpy(dest + dst_offset, &pixel, fb->info.bytes_per_pixel);
 		}
@@ -386,22 +463,21 @@ static inline void draw_sixel(struct framebuffer_t *fb, int line, int col, uint8
 
 static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, int line)
 {
-	int pos, size, bit_base, margin_right;
+	int pos, size, bit_base, ox;
 	int col, w, h;
 	uint32_t pixel;
 	struct color_pair_t color_pair;
 	struct cell_t *cellp;
 	uint8_t *dest = fb_draw_dest(fb);
 
+	ox = grid_origin_x(term);
 	for (col = term->cols - 1; col >= 0; col--) {
-		margin_right = (term->cols - 1 - col) * CELL_WIDTH;
-
 		/* target cell */
 		cellp = &term->cells[line][col];
 
 		/* draw sixel pixmap */
 		if (cellp->has_pixmap && cellp->pixmap) {
-			draw_sixel(fb, line, col, cellp->pixmap);
+			draw_sixel(fb, term, line, col, cellp->pixmap);
 			continue;
 		}
 
@@ -431,7 +507,12 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 				color_pair.bg = color_pair.fg;
 
 			for (w = 0; w < CELL_WIDTH; w++) {
-				pos = (term->width - 1 - margin_right - w) * fb->info.bytes_per_pixel
+				/* w counts from the cell's right edge (bit 0 = LSB =
+				 * rightmost pixel); x grows left-to-right as w shrinks.
+				 * (The old right-anchored form width-1-margin_right-w
+				 * baked in the full leftover on the left; centered grids
+				 * must use the explicit ox + col*CELL_WIDTH form.) */
+				pos = (ox + col * CELL_WIDTH + (CELL_WIDTH - 1 - w)) * fb->info.bytes_per_pixel
 					+ (line * CELL_HEIGHT + h) * fb->info.line_length;
 
 				/* set color palette */
@@ -475,6 +556,9 @@ void refresh(struct framebuffer_t *fb, struct terminal_t *term)
 
 	if (term->mode & MODE_CURSOR)
 		term->line_dirty[term->cursor.y] = true;
+
+	/* Edge strips the grid never covers (left/right/bottom margins). */
+	fb_paint_margin(fb, term);
 
 	for (int line = 0; line < term->lines; line++) {
 		if (term->line_dirty[line]) {

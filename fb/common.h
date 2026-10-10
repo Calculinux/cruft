@@ -430,10 +430,24 @@ static void fb_paint_margin(struct framebuffer_t *fb, struct terminal_t *term)
 	}
 
 	/* Shadow mode: per-line blits only flush the grid rows, so copy the
-	 * bottom strip (if any) to the display ourselves. */
-	if (fb->buf && grid_h < term->height)
-		memcpy(fb->fp + (long)grid_h * ll, fb->buf + (long)grid_h * ll,
-			(long)(term->height - grid_h) * ll);
+	 * uncovered strips to the display ourselves. The side margins in
+	 * particular ride along with dirty-row blits only; a refresh() with
+	 * no dirty rows (e.g. cursor hidden) would otherwise leave stale
+	 * pixels in the visible margins after contamination. */
+	if (fb->buf) {
+		for (y = 0; y < term->height; y++) {
+			if (rem_left > 0)
+				memcpy(fb->fp + (long)y * ll, fb->buf + (long)y * ll,
+					(long)rem_left * bpp);
+			if (rem_right > 0)
+				memcpy(fb->fp + (long)y * ll + (long)(ox + grid_w) * bpp,
+					fb->buf + (long)y * ll + (long)(ox + grid_w) * bpp,
+					(long)rem_right * bpp);
+		}
+		if (grid_h < term->height)
+			memcpy(fb->fp + (long)grid_h * ll, fb->buf + (long)grid_h * ll,
+				(long)(term->height - grid_h) * ll);
+	}
 }
 
 static inline void draw_sixel(struct framebuffer_t *fb, struct terminal_t *term, int line, int col, uint8_t *pixmap)

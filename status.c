@@ -324,7 +324,7 @@ static int sb_nl_family_id(void)
 			break;
 		for (struct nlmsghdr *nh = (struct nlmsghdr *)res.buf; NLMSG_OK(nh, (size_t)bytes);
 		     nh = NLMSG_NEXT(nh, bytes)) {
-			const void *data;
+			const void *data = NULL;
 
 			if (nh->nlmsg_type == NLMSG_ERROR) {
 				fam = -1;

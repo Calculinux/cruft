@@ -506,9 +506,12 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 		}
 	}
 
-	/* actual display update (bit blit) — skip when drawing direct to fp */
+	/* actual display update (bit blit) — skip when drawing direct to fp.
+	 * The grid rows were painted at the oy-shifted origin (row 0 sits
+	 * below the status strip when the bar is on), so flush that band;
+	 * with oy == 0 this is the historical form. */
 	if (fb->buf) {
-		pos = (line * CELL_HEIGHT) * fb->info.line_length;
+		pos = (term->oy + line * CELL_HEIGHT) * fb->info.line_length;
 		size = CELL_HEIGHT * fb->info.line_length;
 		memcpy(fb->fp + pos, fb->buf + pos, size);
 	}

@@ -1035,6 +1035,36 @@ int main(void)
 					}
 					free(pix);
 				}
+
+				/* Q3: shadow (wall) mode: draw_line's per-line flush must land
+				 * on the oy-shifted band; the pre-fix form copied a band oy
+				 * pixels too high, leaving the bottom of each refreshed line
+				 * stale on the visible fb. */
+				uint8_t *qb = (uint8_t *) ecalloc(1,
+					(size_t) M_W * M_H * 4);
+				expect(qb != NULL, "Q3 shadow alloc");
+				if (qb) {
+					m_fill(qfp, 0xCDCDCDCDu, M_W * M_H);
+					m_fill(qb, 0xFFFFFFFFu, M_W * M_H);
+					fbq.buf = qb;
+					for (int y = 0; y < term.lines; y++)
+						term.line_dirty[y] = false;
+					term.line_dirty[3] = true;
+					refresh(&fbq, &term);
+					for (int dy = 0; dy < CELL_HEIGHT; dy++) {
+						expect(m_px_at(qfp, 10,
+							term.oy + 3 * CELL_HEIGHT + dy) == 0x01010101u,
+							"Q3 flush on shifted row");
+						/* rows the shifted band does not reach kept their
+						 * sentinel; the buggy flush had clobbered them */
+						if (dy < term.oy)
+							expect(m_px_at(qfp, 10, 3 * CELL_HEIGHT + dy)
+								== 0xCDCDCDCDu,
+								"Q3 unshifted row untouched");
+					}
+					fbq.buf = NULL;
+					free(qb);
+				}
 			}
 			free_term_cells(&term);
 			free(qfp);

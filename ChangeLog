@@ -148,3 +148,4 @@ $ make yaft
 		CRUFT_SB_FONT (font path); compile default sb_default_segments
 	-	fb type shapes split out to fb/fb.h; margin painting leaves
 		the status strip to the bar
+	-	wall mode: per-line shadow flush honours the oy grid origin

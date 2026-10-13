@@ -452,6 +452,11 @@ static int sb_nl_rssi(const char *ifname)
 		     nh = NLMSG_NEXT(nh, bytes)) {
 			if (nh->nlmsg_type == NLMSG_DONE)
 				goto out;
+			/* drivers rejecting the dump (e.g. -EOPNOTSUPP) send an
+			 * error and no NLMSG_DONE; bail instead of blocking on
+			 * the 200 ms recv timeout for the remainder of the dump */
+			if (nh->nlmsg_type == NLMSG_ERROR)
+				goto out;
 			/* dumped station replies: match the family id and
 			 * the +1 convention both netlink vintages use;
 			 * sta_signal() only answers on real signal attrs */
@@ -811,7 +816,11 @@ static void sb_draw_items(struct framebuffer_t *fb, int x0, int maxw,
 
 		if (!g)
 			continue; /* missing glyph: leave the strip bg */
-		pix = color2pixel(&fb->info, fb->real_palette[r->it[i].col]);
+		/* real_palette[] holds packed device pixels (rebuilt by refresh()
+		 * on palette changes); draw_line writes them directly — the same
+		 * applies here. Feeding them through color2pixel() again garbles
+		 * sub-8bpp visuals (e.g. RGB565 white turns cyan). */
+		pix = fb->real_palette[r->it[i].col];
 		for (int hh = 0; hh < h; hh++) {
 			for (int ww = 0; ww < w; ww++) {
 				int pos = (x + (w - 1 - ww)) * fb->info.bytes_per_pixel
@@ -854,8 +863,9 @@ void statusbar_render(struct framebuffer_t *fb, struct terminal_t *term)
 	dest = fb_draw_dest(fb);
 
 	/* solid strip: wallpaper mode shows the wallpaper in the side/bottom
-	 * margins only; the bar itself is opaque for legibility */
-	bgpix = color2pixel(&fb->info, fb->real_palette[SB_C_BG]);
+	 * margins only; the bar itself is opaque for legibility. Palette
+	 * entries are already packed pixels (see sb_draw_items). */
+	bgpix = fb->real_palette[SB_C_BG];
 	for (int y = 0; y < h; y++)
 		for (int x = 0; x < w; x++)
 			memcpy(dest + y * fb->info.line_length +

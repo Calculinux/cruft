@@ -902,8 +902,10 @@ int main(void)
 						fixtures[i][0]);
 					fx = fopen(qpd, "w");
 					expect(fx != NULL, "Q fixture fopen");
-					fprintf(fx, "%s", fixtures[i][1]);
-					fclose(fx);
+					if (fx) { /* expect() reports but does not stop */
+						fprintf(fx, "%s", fixtures[i][1]);
+						fclose(fx);
+					}
 				}
 			}
 

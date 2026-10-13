@@ -149,3 +149,11 @@ $ make yaft
 	-	fb type shapes split out to fb/fb.h; margin painting leaves
 		the status strip to the bar
 	-	wall mode: per-line shadow flush honours the oy grid origin
+
+## 2026-10-13
+-	split per-screen state into struct screen_t scr[2]: cells, dirty
+	flags, tabstops, scroll margins, cursor and wrap flag; the
+	active_screen() accessor (cruft.h) is the single routing point
+-	reserve the alternate screen (scr[1]) for DECALT (1049): it stays
+	unallocated and lazy until first entry. Pure refactor, no behavior
+	change (selftest section R pins the routing)

@@ -20,6 +20,18 @@ Cell sixel pixmaps are kept for redraw after the next `SIGUSR1`.
 `sigsuspend` deliberately allows `SIGTERM`/`SIGINT`/`SIGCHLD` so `systemctl stop`
 can restart inactive VTs when changing `CONSOLE_FONT` (otherwise only tty1 updated).
 
+## Screen state
+
+Per-screen state (cell matrix, dirty flags, tabstops, scroll margins,
+cursor, wrap flag) lives in `struct screen_t scr[2]`; `active_screen()`
+(cruft.h) is the single routing point for all of it. Only `scr[0]`
+(primary) is allocated — `scr[1]` (alternate) is reserved and will be
+lazily allocated on first DECALT (`CSI ?1049h`) entry, which also toggles
+`term->active`. Screen-independent state (SGR/attribute, G0-G1, palettes,
+DRCS, sixel canvas) intentionally stays in `struct terminal_t`. Split is a
+pure refactor prep for DECALT + scrollback; selftest section R pins the
+routing.
+
 ## Status bar
 
 An 8px strip in the top margin, above the cell grid, rendered in the

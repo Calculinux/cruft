@@ -127,18 +127,28 @@ struct sixel_canvas_t {
 	uint32_t color_table[COLORS];
 };
 
+/* Per-screen state. scr[0] (primary) is allocated eagerly by term_init();
+ * scr[1] (alternate) stays reserved until DECALT lands. Shared state
+ * (SGR, charsets, palette, DRCS, sixel canvas) intentionally stays in
+ * struct terminal_t: it is screen-independent by DEC definition. */
+struct screen_t {
+	struct cell_t **cells;        /* pointer to each line: cells[y] is line y */
+	bool *line_dirty;             /* dirty flag */
+	bool *tabstop;                /* tabstop flag */
+	struct margin_t scroll;       /* scroll margin */
+	struct point_t cursor;        /* cursor pos (x, y) */
+	bool wrap_occurred;           /* whether auto wrap occurred or not */
+	bool allocated;               /* cell matrix backing store exists */
+};
+
 struct terminal_t {
 	int fd;                                  /* master of pseudo terminal */
 	int width, height;                       /* terminal size (pixel) */
 	uint16_t oy;                              /* top status strip height (px) */
 	int cols, lines;                         /* terminal size (cell) */
-	struct cell_t **cells;                   /* pointer to each cell: cells[y * lines + x] */
-	struct margin_t scroll;                  /* scroll margin */
-	struct point_t cursor;                   /* cursor pos (x, y) */
-	bool *line_dirty;                        /* dirty flag */
-	bool *tabstop;                           /* tabstop flag */
+	struct screen_t scr[2];                  /* scr[0]: primary, scr[1]: alternate (reserved) */
+	unsigned active;                         /* index of the active screen in scr[] */
 	enum term_mode mode;                     /* for set/reset mode */
-	bool wrap_occurred;                      /* whether auto wrap occurred or not */
 	struct state_t state;                    /* for restore */
 	struct color_pair_t color_pair;          /* color (fg, bg) */
 	enum char_attr attribute;                /* bold, underscore, etc... */
@@ -150,6 +160,14 @@ struct terminal_t {
 	struct glyph_t *drcs[DRCS_CHARSETS];     /* lazy DRCS charset tables */
 	struct sixel_canvas_t sixel;
 };
+
+/* The screen the cursor, cells and scroll margins currently belong to.
+ * Centralizes active-screen selection so DECALT can toggle term->active
+ * in one place without touching every cell/cursor access. */
+static inline struct screen_t *active_screen(struct terminal_t *term)
+{
+	return &term->scr[term->active];
+}
 
 struct parm_t { /* for parse_arg() */
 	int argc;

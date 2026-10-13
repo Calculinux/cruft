@@ -4,6 +4,7 @@
 int set_cell(struct terminal_t *term, int y, int x, const struct glyph_t *glyphp)
 {
 	struct cell_t cell, *cellp;
+	struct screen_t *scr = active_screen(term);
 	uint8_t color_tmp;
 
 	cell.glyphp = glyphp;
@@ -24,13 +25,13 @@ int set_cell(struct terminal_t *term, int y, int x, const struct glyph_t *glyphp
 	cell.has_pixmap = false;
 	cell.pixmap     = NULL;
 
-	cellp = &term->cells[y][x];
+	cellp = &scr->cells[y][x];
 	cell_pixmap_clear(cellp);
 	*cellp = cell;
-	term->line_dirty[y] = true;
+	scr->line_dirty[y] = true;
 
 	if (cell.width == WIDE && x + 1 < term->cols) {
-		cellp = &term->cells[y][x + 1];
+		cellp = &scr->cells[y][x + 1];
 		cell_pixmap_clear(cellp);
 		*cellp = cell;
 		cellp->width = NEXT_TO_WIDE;
@@ -39,7 +40,7 @@ int set_cell(struct terminal_t *term, int y, int x, const struct glyph_t *glyphp
 
 	if (cell.width == HALF /* isolated NEXT_TO_WIDE cell */
 		&& x + 1 < term->cols
-		&& term->cells[y][x + 1].width == NEXT_TO_WIDE) {
+		&& scr->cells[y][x + 1].width == NEXT_TO_WIDE) {
 		erase_cell(term, y, x + 1);
 	}
 	return HALF;
@@ -47,15 +48,17 @@ int set_cell(struct terminal_t *term, int y, int x, const struct glyph_t *glyphp
 
 static inline void swap_lines(struct terminal_t *term, int i, int j)
 {
+	struct cell_t **cells = active_screen(term)->cells;
 	struct cell_t *tmp;
 
-	tmp            = term->cells[i];
-	term->cells[i] = term->cells[j];
-	term->cells[j] = tmp;
+	tmp        = cells[i];
+	cells[i]   = cells[j];
+	cells[j]   = tmp;
 }
 
 void scroll(struct terminal_t *term, int from, int to, int offset)
 {
+	struct screen_t *scr = active_screen(term);
 	int abs_offset, scroll_lines;
 
 	if (offset == 0 || from >= to)
@@ -64,7 +67,7 @@ void scroll(struct terminal_t *term, int from, int to, int offset)
 	logging(DEBUG, "scroll from:%d to:%d offset:%d\n", from, to, offset);
 
 	for (int y = from; y <= to; y++)
-		term->line_dirty[y] = true;
+		scr->line_dirty[y] = true;
 
 	abs_offset = abs(offset);
 	scroll_lines = (to - from + 1) - abs_offset;
@@ -88,45 +91,47 @@ void scroll(struct terminal_t *term, int from, int to, int offset)
 /* relative movement: cause scrolling */
 void move_cursor(struct terminal_t *term, int y_offset, int x_offset)
 {
+	struct screen_t *scr = active_screen(term);
 	int x, y, top, bottom;
 
-	x = term->cursor.x + x_offset;
-	y = term->cursor.y + y_offset;
+	x = scr->cursor.x + x_offset;
+	y = scr->cursor.y + y_offset;
 
-	top    = term->scroll.top;
-	bottom = term->scroll.bottom;
+	top    = scr->scroll.top;
+	bottom = scr->scroll.bottom;
 
 	if (x < 0) {
 		x = 0;
 	} else if (x >= term->cols) {
 		if (term->mode & MODE_AMRIGHT)
-			term->wrap_occurred = true;
+			scr->wrap_occurred = true;
 		x = term->cols - 1;
 	}
-	term->cursor.x = x;
+	scr->cursor.x = x;
 
 	y = (y < 0) ? 0:
 		(y >= term->lines) ? term->lines - 1: y;
 
-	if (term->cursor.y == top && y_offset < 0) {
+	if (scr->cursor.y == top && y_offset < 0) {
 		y = top;
 		scroll(term, top, bottom, y_offset);
-	} else if (term->cursor.y == bottom && y_offset > 0) {
+	} else if (scr->cursor.y == bottom && y_offset > 0) {
 		y = bottom;
 		scroll(term, top, bottom, y_offset);
 	}
-	term->cursor.y = y;
+	scr->cursor.y = y;
 }
 
 /* absolute movement: never scroll */
 void set_cursor(struct terminal_t *term, int y, int x)
 {
+	struct screen_t *scr = active_screen(term);
 	int top, bottom;
 
 	if (term->mode & MODE_ORIGIN) {
-		top    = term->scroll.top;
-		bottom = term->scroll.bottom;
-		y += term->scroll.top;
+		top    = scr->scroll.top;
+		bottom = scr->scroll.bottom;
+		y += scr->scroll.top;
 	} else {
 		top = 0;
 		bottom = term->lines - 1;
@@ -135,13 +140,14 @@ void set_cursor(struct terminal_t *term, int y, int x)
 	x = (x < 0) ? 0: (x >= term->cols) ? term->cols - 1: x;
 	y = (y < top) ? top: (y > bottom) ? bottom: y;
 
-	term->cursor.x = x;
-	term->cursor.y = y;
-	term->wrap_occurred = false;
+	scr->cursor.x = x;
+	scr->cursor.y = y;
+	scr->wrap_occurred = false;
 }
 
 void addch(struct terminal_t *term, uint32_t code)
 {
+	struct screen_t *scr = active_screen(term);
 	int width;
 	const struct glyph_t *glyphp;
 
@@ -161,14 +167,14 @@ void addch(struct terminal_t *term, uint32_t code)
 			glyphp = (width == 1) ? glyph_get(SUBSTITUTE_HALF): glyph_get(SUBSTITUTE_WIDE);
 	}
 
-	if ((term->wrap_occurred && term->cursor.x == term->cols - 1) /* folding */
-		|| (glyphp->width == WIDE && term->cursor.x == term->cols - 1)) {
-		set_cursor(term, term->cursor.y, 0);
+	if ((scr->wrap_occurred && scr->cursor.x == term->cols - 1) /* folding */
+		|| (glyphp->width == WIDE && scr->cursor.x == term->cols - 1)) {
+		set_cursor(term, scr->cursor.y, 0);
 		move_cursor(term, 1, 0);
 	}
-	term->wrap_occurred = false;
+	scr->wrap_occurred = false;
 
-	move_cursor(term, 0, set_cell(term, term->cursor.y, term->cursor.x, glyphp));
+	move_cursor(term, 0, set_cell(term, scr->cursor.y, scr->cursor.x, glyphp));
 }
 
 void reset_esc(struct terminal_t *term)
@@ -243,17 +249,19 @@ void reset_charset(struct terminal_t *term)
 
 void reset(struct terminal_t *term)
 {
+	struct screen_t *scr = active_screen(term);
+
 	term->mode  = MODE_RESET;
 	term->mode |= (MODE_CURSOR | MODE_AMRIGHT);
-	term->wrap_occurred = false;
+	scr->wrap_occurred = false;
 
-	term->scroll.top    = 0;
-	term->scroll.bottom = term->lines - 1;
+	scr->scroll.top    = 0;
+	scr->scroll.bottom = term->lines - 1;
 
-	term->cursor.x = term->cursor.y = 0;
+	scr->cursor.x = scr->cursor.y = 0;
 
 	term->state.mode      = term->mode;
-	term->state.cursor    = term->cursor;
+	term->state.cursor    = scr->cursor;
 	term->state.attribute = ATTR_RESET;
 
 	term->color_pair.fg = DEFAULT_FG;
@@ -265,11 +273,11 @@ void reset(struct terminal_t *term)
 		for (int col = 0; col < term->cols; col++) {
 			erase_cell(term, line, col);
 			if ((col % TABSTOP) == 0)
-				term->tabstop[col] = true;
+				scr->tabstop[col] = true;
 			else
-				term->tabstop[col] = false;
+				scr->tabstop[col] = false;
 		}
-		term->line_dirty[line] = true;
+		scr->line_dirty[line] = true;
 	}
 
 	reset_esc(term);
@@ -278,8 +286,10 @@ void reset(struct terminal_t *term)
 
 void redraw(struct terminal_t *term)
 {
+	struct screen_t *scr = active_screen(term);
+
 	for (int i = 0; i < term->lines; i++)
-		term->line_dirty[i] = true;
+		scr->line_dirty[i] = true;
 	statusbar_invalidate(); /* full redraws repaint the status strip too */
 }
 
@@ -287,26 +297,32 @@ void term_die(struct terminal_t *term)
 {
 	int i, j;
 
-	if (term->cells) {
-		for (i = 0; i < term->lines; i++) {
-			if (term->cells[i]) {
-				for (j = 0; j < term->cols; j++)
-					cell_pixmap_clear(&term->cells[i][j]);
-				free(term->cells[i]);
+	/* Free every screen that is backed by a cell matrix (the alternate
+	 * stays NULL until DECALT allocates it lazily). */
+	for (i = 0; i < 2; i++) {
+		struct screen_t *scr = &term->scr[i];
+
+		if (scr->cells) {
+			for (j = 0; j < term->lines; j++) {
+				if (scr->cells[j]) {
+					for (int k = 0; k < term->cols; k++)
+						cell_pixmap_clear(&scr->cells[j][k]);
+					free(scr->cells[j]);
+				}
 			}
+			free(scr->cells);
+			scr->cells = NULL;
 		}
-		free(term->cells);
-		term->cells = NULL;
+		free(scr->line_dirty);
+		scr->line_dirty = NULL;
+		free(scr->tabstop);
+		scr->tabstop = NULL;
 	}
 
 	drcs_clear_all(term);
 	sixel_canvas_free(term);
 
-	free(term->line_dirty);
-	free(term->tabstop);
 	free(term->esc.buf);
-	term->line_dirty = NULL;
-	term->tabstop = NULL;
 	term->esc.buf = NULL;
 }
 
@@ -327,22 +343,30 @@ bool term_init(struct terminal_t *term, int width, int height)
 
 	logging(DEBUG, "terminal cols:%d lines:%d\n", term->cols, term->lines);
 
-	/* allocate memory */
-	term->line_dirty   = (bool *) ecalloc(term->lines, sizeof(bool));
-	term->tabstop      = (bool *) ecalloc(term->cols, sizeof(bool));
-	term->esc.buf      = (char *) ecalloc(1, term->esc.size);
-	term->sixel.pixmap = NULL; /* lazy: sixel_canvas_ensure on first sixel */
+	/* Screens: the primary (scr[0]) is the active one; the alternate
+	 * (scr[1]) stays reserved zeroed until DECALT allocates it lazily. */
+	term->active = 0;
+	term->scr[0] = (struct screen_t) {0};
+	term->scr[1] = (struct screen_t) {0};
+
+	/* allocate memory (primary screen only) */
+	term->scr[0].allocated  = true;
+	term->scr[0].line_dirty = (bool *) ecalloc(term->lines, sizeof(bool));
+	term->scr[0].tabstop    = (bool *) ecalloc(term->cols, sizeof(bool));
+	term->esc.buf           = (char *) ecalloc(1, term->esc.size);
+	term->sixel.pixmap      = NULL; /* lazy: sixel_canvas_ensure on first sixel */
 
 	memset(term->drcs, 0, sizeof(term->drcs));
 
-	term->cells        = (struct cell_t **) ecalloc(term->lines, sizeof(struct cell_t *));
-	if (!term->line_dirty || !term->tabstop || !term->cells || !term->esc.buf) {
+	term->scr[0].cells = (struct cell_t **) ecalloc(term->lines, sizeof(struct cell_t *));
+	if (!term->scr[0].line_dirty || !term->scr[0].tabstop
+		|| !term->scr[0].cells || !term->esc.buf) {
 		term_die(term);
 		return false;
 	}
 	for (int i = 0; i < term->lines; i++) {
-		term->cells[i] = (struct cell_t *) ecalloc(term->cols, sizeof(struct cell_t));
-		if (!term->cells[i]) {
+		term->scr[0].cells[i] = (struct cell_t *) ecalloc(term->cols, sizeof(struct cell_t));
+		if (!term->scr[0].cells[i]) {
 			term_die(term);
 			return false;
 		}

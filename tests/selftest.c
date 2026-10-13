@@ -17,6 +17,7 @@
 #include "util.h"
 #include "fb/common.h"
 #include "status.h"
+#include "terminal.h"
 
 const uint32_t color_list[COLORS];
 
@@ -39,11 +40,8 @@ const char *fb_path = "/dev/fb0";
 const char *shell_cmd = "/bin/bash";
 const char *sb_default_segments = "all";
 
-/* sixel_copy2cell also calls these (scroll/CR not under test here) */
-void move_cursor(struct terminal_t *term, int y_offset, int x_offset)
-{
-	(void)term; (void)y_offset; (void)x_offset;
-}
+/* cr() lives in ctrlseq/esc.h (not linked here); move_cursor/scroll/etc.
+ * are the real terminal.h definitions. */
 void cr(struct terminal_t *term)
 {
 	(void)term;
@@ -1258,6 +1256,100 @@ int main(void)
 		expect(rscr->line_dirty[2] == true, "R erase dirties scr[0]");
 		expect(ralt->cells == NULL, "R alternate still untouched");
 		free_term_cells(&term);
+	}
+
+	/* S: DECALT alternate screen (CSI ?1049h/l) through the real engine:
+	 * lazy alt alloc, wipe on entry, primary freeze, cursor/margin
+	 * parking, doubled/mismatched no-ops, RIS discard, re-entry. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *p, *a;
+		const struct glyph_t *qm = glyph_get(0x3f);
+
+		expect(term_init(&term, 96, 48), "S term_init 16x4");
+		expect(term.cols == 16 && term.lines == 4 && term.oy == 0,
+			"S grid 16x4 (no status bar)");
+
+		/* seed a primary marker, park cursor + margins */
+		set_cell(&term, 0, 1, qm);
+		set_cursor(&term, 2, 4);
+		active_screen(&term)->scroll.top = 1;
+
+		/* ---- enter */
+		enter_alt_screen(&term);
+		expect(term.active == 1, "S enter switches to alt");
+		expect(active_screen(&term) == &term.scr[1], "S accessor follows active");
+		a = &term.scr[1];
+		expect(a->cursor.x == 0 && a->cursor.y == 0, "S alt cursor homed");
+		expect(a->scroll.top == 0 && a->scroll.bottom == 3, "S alt margin full");
+		expect(a->cells[1][1].glyphp == glyph_get(DEFAULT_CHAR), "S alt wiped");
+		{
+			int all_dirty = 1;
+
+			for (int y = 0; y < 4; y++)
+				all_dirty &= a->line_dirty[y];
+			expect(all_dirty, "S alt all lines dirty");
+		}
+		expect(term.alt_saved.cursor.x == 4 && term.alt_saved.cursor.y == 2 &&
+			term.alt_saved.scroll.top == 1, "S primary state parked");
+		expect(term.scr[0].cells[0][1].glyphp == qm, "S primary frozen (marker)");
+
+		/* writes/scrolls inside the alt screen must not leak into the primary */
+		set_cell(&term, 1, 1, qm);
+		expect(a->cells[1][1].glyphp == qm, "S alt write lands in scr[1]");
+		set_cursor(&term, 3, 15);
+		move_cursor(&term, 1, 0); /* bottom edge: scroll up in alt */
+		expect(term.scr[0].cells[0][1].glyphp == qm, "S primary intact after alt scroll");
+		expect(a->cells[0][1].glyphp == qm, "S alt scroll moved row 1 -> 0");
+
+		/* ---- leave */
+		leave_alt_screen(&term);
+		expect(term.active == 0, "S leave back to primary");
+		p = active_screen(&term);
+		expect(p->cursor.x == 4 && p->cursor.y == 2, "S cursor restored");
+		expect(p->scroll.top == 1, "S margin restored");
+		expect(p->cells[0][1].glyphp == qm, "S primary marker visible again");
+		{
+			int all_dirty = 1;
+
+			for (int y = 0; y < 4; y++)
+				all_dirty &= p->line_dirty[y];
+			expect(all_dirty, "S primary forced full repaint");
+		}
+		expect(a->cells[0][1].glyphp == qm, "S alt content kept between visits");
+
+		/* ---- idempotency */
+		enter_alt_screen(&term); /* parks (4,2) again */
+		enter_alt_screen(&term); /* doubled: must not re-park the homed cursor */
+		leave_alt_screen(&term);
+		expect(p->cursor.x == 4 && p->cursor.y == 2,
+			"S doubled enter kept parked cursor");
+		leave_alt_screen(&term); /* mismatched: no-op */
+		expect(term.active == 0, "S doubled leave no-op");
+
+		/* ---- RIS discards the residence and the matrix */
+		enter_alt_screen(&term);
+		reset(&term);
+		expect(term.active == 0, "S RIS forces primary");
+		expect(a->cells == NULL && a->allocated == false,
+			"S RIS dropped alt matrix");
+		expect(p->cells[0][1].glyphp == glyph_get(DEFAULT_CHAR),
+			"S RIS wiped primary marker");
+
+		/* re-entry re-allocates lazily; term_die frees both screens */
+		enter_alt_screen(&term);
+		expect(term.active == 1 && a->cells != NULL, "S re-entry re-allocates");
+		leave_alt_screen(&term);
+		expect(a->cells != NULL, "S matrix kept between visits");
+		/* RIS must drop the resident matrix even while the primary is
+		 * active (the kept-between-visits case). */
+		reset(&term);
+		expect(term.active == 0 && a->cells == NULL,
+			"S RIS drops resident matrix on primary");
+		term_die(&term);
+		expect(term.scr[0].cells == NULL && a->cells == NULL,
+			"S term_die freed both screens");
 	}
 
 	if (failures) {

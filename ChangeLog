@@ -157,3 +157,15 @@ $ make yaft
 -	reserve the alternate screen (scr[1]) for DECALT (1049): it stays
 	unallocated and lazy until first entry. Pure refactor, no behavior
 	change (selftest section R pins the routing)
+
+## 2026-10-13
+-	alternate screen (DECALT, CSI ?1049h/l): scr[1] allocated lazily
+	on first entry, kept between excursions, wiped on every entry;
+	the primary is frozen while the alt screen is resident (only the
+	cursor and scroll margins are parked); doubled/mismatched 1049
+	are no-ops; RIS ends the residence and drops the matrix
+-	terminfo: advertise smcup/rmcup so ncurses full-screen apps (vim,
+	htop, less) request the alt screen instead of painting over the
+	main buffer
+-	selftest links the real terminal.h (dropped the move_cursor
+	stub); section S covers the DECALT lifecycle end to end

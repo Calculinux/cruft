@@ -6,24 +6,26 @@
 void erase_cell(struct terminal_t *term, int y, int x)
 {
 	struct cell_t *cellp;
+	struct screen_t *scr = active_screen(term);
 
-	cellp = &term->cells[y][x];
+	cellp = &scr->cells[y][x];
 	cell_pixmap_clear(cellp);
 	cellp->glyphp     = glyph_get(DEFAULT_CHAR);
 	cellp->color_pair = term->color_pair; /* bce */
 	cellp->attribute  = ATTR_RESET;
 	cellp->width      = HALF;
 
-	term->line_dirty[y] = true;
+	scr->line_dirty[y] = true;
 }
 
 void copy_cell(struct terminal_t *term, int dst_y, int dst_x, int src_y, int src_x)
 {
 	struct cell_t *dst;
 	const struct cell_t *src;
+	struct screen_t *scr = active_screen(term);
 
-	dst = &term->cells[dst_y][dst_x];
-	src = &term->cells[src_y][src_x];
+	dst = &scr->cells[dst_y][dst_x];
+	src = &scr->cells[src_y][src_x];
 
 	if (src->width == NEXT_TO_WIDE) {
 		return;
@@ -43,6 +45,6 @@ void copy_cell(struct terminal_t *term, int dst_y, int dst_x, int src_y, int src
 			(dst + 1)->has_pixmap = false;
 			cell_pixmap_dup(dst + 1, src);
 		}
-		term->line_dirty[dst_y] = true;
+		scr->line_dirty[dst_y] = true;
 	}
 }

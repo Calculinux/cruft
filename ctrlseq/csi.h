@@ -2,16 +2,17 @@
 /* function for csi sequence */
 void insert_blank(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, num = sum(parm);
 
 	if (num <= 0)
 		num = 1;
 
-	for (i = term->cols - 1; term->cursor.x <= i; i--) {
-		if (term->cursor.x <= (i - num))
-			copy_cell(term, term->cursor.y, i, term->cursor.y, i - num);
+	for (i = term->cols - 1; scr->cursor.x <= i; i--) {
+		if (scr->cursor.x <= (i - num))
+			copy_cell(term, scr->cursor.y, i, scr->cursor.y, i - num);
 		else
-			erase_cell(term, term->cursor.y, i);
+			erase_cell(term, scr->cursor.y, i);
 	}
 }
 
@@ -82,7 +83,7 @@ void curs_col(struct terminal_t *term, struct parm_t *parm)
 	int num;
 
 	num = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]) - 1;
-	set_cursor(term, term->cursor.y, num);
+	set_cursor(term, active_screen(term)->cursor.y, num);
 }
 
 void curs_pos(struct terminal_t *term, struct parm_t *parm)
@@ -111,11 +112,12 @@ void curs_line(struct terminal_t *term, struct parm_t *parm)
 	int num;
 
 	num = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]) - 1;
-	set_cursor(term, num, term->cursor.x);
+	set_cursor(term, num, active_screen(term)->cursor.x);
 }
 
 void erase_display(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, j, mode;
 
 	mode = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]);
@@ -124,14 +126,14 @@ void erase_display(struct terminal_t *term, struct parm_t *parm)
 		return;
 
 	if (mode == 0) {
-		for (i = term->cursor.y; i < term->lines; i++)
+		for (i = scr->cursor.y; i < term->lines; i++)
 			for (j = 0; j < term->cols; j++)
-				if (i > term->cursor.y || (i == term->cursor.y && j >= term->cursor.x))
+				if (i > scr->cursor.y || (i == scr->cursor.y && j >= scr->cursor.x))
 					erase_cell(term, i, j);
 	} else if (mode == 1) {
-		for (i = 0; i <= term->cursor.y; i++)
+		for (i = 0; i <= scr->cursor.y; i++)
 			for (j = 0; j < term->cols; j++)
-				if (i < term->cursor.y || (i == term->cursor.y && j <= term->cursor.x))
+				if (i < scr->cursor.y || (i == scr->cursor.y && j <= scr->cursor.x))
 					erase_cell(term, i, j);
 	} else if (mode == 2) {
 		for (i = 0; i < term->lines; i++)
@@ -142,6 +144,7 @@ void erase_display(struct terminal_t *term, struct parm_t *parm)
 
 void erase_line(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, mode;
 
 	mode = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]);
@@ -150,75 +153,79 @@ void erase_line(struct terminal_t *term, struct parm_t *parm)
 		return;
 
 	if (mode == 0) {
-		for (i = term->cursor.x; i < term->cols; i++)
-			erase_cell(term, term->cursor.y, i);
+		for (i = scr->cursor.x; i < term->cols; i++)
+			erase_cell(term, scr->cursor.y, i);
 	} else if (mode == 1) {
-		for (i = 0; i <= term->cursor.x; i++)
-			erase_cell(term, term->cursor.y, i);
+		for (i = 0; i <= scr->cursor.x; i++)
+			erase_cell(term, scr->cursor.y, i);
 	} else if (mode == 2) {
 		for (i = 0; i < term->cols; i++)
-			erase_cell(term, term->cursor.y, i);
+			erase_cell(term, scr->cursor.y, i);
 	}
 }
 
 void insert_line(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int num = sum(parm);
 
 	if (term->mode & MODE_ORIGIN) {
-		if (term->cursor.y < term->scroll.top
-			|| term->cursor.y > term->scroll.bottom)
+		if (scr->cursor.y < scr->scroll.top
+			|| scr->cursor.y > scr->scroll.bottom)
 			return;
 	}
 
 	if (num <= 0)
 		num = 1;
 
-	scroll(term, term->cursor.y, term->scroll.bottom, -num);
+	scroll(term, scr->cursor.y, scr->scroll.bottom, -num);
 }
 
 void delete_line(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int num = sum(parm);
 
 	if (term->mode & MODE_ORIGIN) {
-		if (term->cursor.y < term->scroll.top
-			|| term->cursor.y > term->scroll.bottom)
+		if (scr->cursor.y < scr->scroll.top
+			|| scr->cursor.y > scr->scroll.bottom)
 			return;
 	}
 
 	if (num <= 0)
 		num = 1;
 
-	scroll(term, term->cursor.y, term->scroll.bottom, num);
+	scroll(term, scr->cursor.y, scr->scroll.bottom, num);
 }
 
 void delete_char(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, num = sum(parm);
 
 	if (num <= 0)
 		num = 1;
 
-	for (i = term->cursor.x; i < term->cols; i++) {
+	for (i = scr->cursor.x; i < term->cols; i++) {
 		if ((i + num) < term->cols)
-			copy_cell(term, term->cursor.y, i, term->cursor.y, i + num);
+			copy_cell(term, scr->cursor.y, i, scr->cursor.y, i + num);
 		else
-			erase_cell(term, term->cursor.y, i);
+			erase_cell(term, scr->cursor.y, i);
 	}
 }
 
 void erase_char(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, num = sum(parm);
 
 	if (num <= 0)
 		num = 1;
-	else if (num + term->cursor.x > term->cols)
-		num = term->cols - term->cursor.x;
+	else if (num + scr->cursor.x > term->cols)
+		num = term->cols - scr->cursor.x;
 
-	for (i = term->cursor.x; i < term->cursor.x + num; i++)
-		erase_cell(term, term->cursor.y, i);
+	for (i = scr->cursor.x; i < scr->cursor.x + num; i++)
+		erase_cell(term, scr->cursor.y, i);
 }
 
 uint8_t rgb2index(uint8_t r, uint8_t g, uint8_t b)
@@ -386,7 +393,9 @@ void status_report(struct terminal_t *term, struct parm_t *parm)
 		if (num == 5) {         /* terminal response: ready */
 			ewrite(term->fd, "\033[0n", 4);
 		} else if (num == 6) {  /* cursor position report */
-			snprintf(buf, BUFSIZE, "\033[%d;%dR", term->cursor.y + 1, term->cursor.x + 1);
+			snprintf(buf, BUFSIZE, "\033[%d;%dR",
+				active_screen(term)->cursor.y + 1,
+				active_screen(term)->cursor.x + 1);
 			ewrite(term->fd, buf, strlen(buf));
 		} else if (num == 15) { /* terminal response: printer not connected */
 			ewrite(term->fd, "\033[?13n", 6);
@@ -438,7 +447,7 @@ void reset_mode(struct terminal_t *term, struct parm_t *parm)
 			set_cursor(term, 0, 0);
 		} else if (mode == 7) {
 			term->mode &= ~MODE_AMRIGHT;
-			term->wrap_occurred = false;
+			active_screen(term)->wrap_occurred = false;
 		} else if (mode == 25) {
 			term->mode &= ~MODE_CURSOR;
 		} else if (mode == 8901) {
@@ -450,6 +459,7 @@ void reset_mode(struct terminal_t *term, struct parm_t *parm)
 
 void set_margin(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int top, bottom;
 
 	if (parm->argc <= 0) {        /* CSI r */
@@ -470,26 +480,27 @@ void set_margin(struct terminal_t *term, struct parm_t *parm)
 	if (top >= bottom)
 		return;
 
-	term->scroll.top = top;
-	term->scroll.bottom = bottom;
+	scr->scroll.top = top;
+	scr->scroll.bottom = bottom;
 
 	set_cursor(term, 0, 0); /* move cursor to home */
 }
 
 void clear_tabstop(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, j, num;
 
 	if (parm->argc <= 0) {
-		term->tabstop[term->cursor.x] = false;
+		scr->tabstop[scr->cursor.x] = false;
 	} else {
 		for (i = 0; i < parm->argc; i++) {
 			num = dec2num(parm->argv[i]);
 			if (num == 0) {
-				term->tabstop[term->cursor.x] = false;
+				scr->tabstop[scr->cursor.x] = false;
 			} else if (num == 3) {
 				for (j = 0; j < term->cols; j++)
-					term->tabstop[j] = false;
+					scr->tabstop[j] = false;
 				return;
 			}
 		}

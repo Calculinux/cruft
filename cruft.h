@@ -118,6 +118,14 @@ struct state_t {   /* for save, restore state */
 	enum char_attr attribute;
 };
 
+/* Cursor + scroll margins parked while the alternate screen (DECALT,
+ * CSI ?1049h) is resident: the primary is never written to in the
+ * meantime, so only these two escape a full-screen repaint. */
+struct alt_saved_t {
+	struct point_t cursor;
+	struct margin_t scroll;
+};
+
 struct sixel_canvas_t {
 	uint8_t *pixmap;
 	struct point_t point;
@@ -150,6 +158,7 @@ struct terminal_t {
 	unsigned active;                         /* index of the active screen in scr[] */
 	enum term_mode mode;                     /* for set/reset mode */
 	struct state_t state;                    /* for restore */
+	struct alt_saved_t alt_saved;            /* cursor/margins parked in DECALT */
 	struct color_pair_t color_pair;          /* color (fg, bg) */
 	enum char_attr attribute;                /* bold, underscore, etc... */
 	struct charset_t charset;                /* store UTF-8 byte stream */

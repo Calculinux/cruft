@@ -12,6 +12,10 @@ cruft \- Calculinux reduced footprint framebuffer terminal
 is a Linux framebuffer terminal emulator derived from yaft, tuned for
 low memory on Calculinux devices.
 .PP
+The alternate screen buffer (DECALT) is implemented, so full-screen
+programs (vim, htop, less) run on their own buffer and leave the main
+screen intact when they exit.
+.PP
 When a status font is installed, cruft draws a status bar in the margin
 strip above the cell grid: the clock in the centre, and a wifi signal
 stair and battery indicator on the right. A segment whose data source is

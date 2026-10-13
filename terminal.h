@@ -88,6 +88,85 @@ void scroll(struct terminal_t *term, int from, int to, int offset)
 	}
 }
 
+/* Allocate one screen's cell matrix (+dirty/tabstop vectors). All or
+ * nothing: partial allocations are rolled back on failure. */
+static bool screen_matrix_alloc(struct terminal_t *term, struct screen_t *scr)
+{
+	scr->line_dirty = (bool *) ecalloc(term->lines, sizeof(bool));
+	scr->tabstop    = (bool *) ecalloc(term->cols, sizeof(bool));
+	scr->cells      = (struct cell_t **) ecalloc(term->lines, sizeof(struct cell_t *));
+	if (!scr->line_dirty || !scr->tabstop || !scr->cells)
+		goto err;
+	for (int i = 0; i < term->lines; i++) {
+		scr->cells[i] = (struct cell_t *) ecalloc(term->cols, sizeof(struct cell_t));
+		if (!scr->cells[i])
+			goto err;
+	}
+
+	scr->allocated = true;
+	return true;
+
+err:
+	if (scr->cells) {
+		for (int i = 0; i < term->lines; i++)
+			if (scr->cells[i])
+				free(scr->cells[i]);
+		free(scr->cells);
+	}
+	free(scr->line_dirty);
+	free(scr->tabstop);
+	scr->line_dirty = NULL;
+	scr->tabstop = NULL;
+	scr->cells = NULL;
+	return false;
+}
+
+static void screen_matrix_free(struct terminal_t *term, struct screen_t *scr)
+{
+	if (scr->cells) {
+		for (int i = 0; i < term->lines; i++) {
+			if (scr->cells[i]) {
+				for (int j = 0; j < term->cols; j++)
+					cell_pixmap_clear(&scr->cells[i][j]);
+				free(scr->cells[i]);
+			}
+		}
+		free(scr->cells);
+	}
+	free(scr->line_dirty);
+	free(scr->tabstop);
+	scr->cells = NULL;
+	scr->line_dirty = NULL;
+	scr->tabstop = NULL;
+	scr->allocated = false;
+}
+
+/* Blank the active screen (BCE-colored fills), home the cursor, set the
+ * full-screen margin, init tabstops and mark every line dirty. Unlike
+ * reset() it deliberately leaves shared terminal state (modes, SGR, esc
+ * buffer) alone so DECALT entry can reuse it without wrecking the app's
+ * rendition. */
+static inline void screen_clear(struct terminal_t *term)
+{
+	struct screen_t *scr = active_screen(term);
+
+	scr->wrap_occurred = false;
+	scr->scroll.top    = 0;
+	scr->scroll.bottom = term->lines - 1;
+	scr->cursor.x = scr->cursor.y = 0;
+
+	for (int line = 0; line < term->lines; line++) {
+		for (int col = 0; col < term->cols; col++) {
+			erase_cell(term, line, col);
+			if ((col % TABSTOP) == 0)
+				scr->tabstop[col] = true;
+			else
+				scr->tabstop[col] = false;
+		}
+		scr->line_dirty[line] = true;
+	}
+}
+
 /* relative movement: cause scrolling */
 void move_cursor(struct terminal_t *term, int y_offset, int x_offset)
 {
@@ -249,36 +328,29 @@ void reset_charset(struct terminal_t *term)
 
 void reset(struct terminal_t *term)
 {
-	struct screen_t *scr = active_screen(term);
+	/* Hard reset (RIS) ends any alternate-screen residence and drops the
+	 * matrix: the app's state is gone either way. The matrix can be
+	 * resident with active==0 (kept after a normal DECALT leave), so it
+	 * is freed unconditionally; the switch back is the conditional part.
+	 * Freeing an unallocated screen is a no-op. */
+	if (term->active == 1)
+		term->active = 0;
+	screen_matrix_free(term, &term->scr[1]);
 
 	term->mode  = MODE_RESET;
 	term->mode |= (MODE_CURSOR | MODE_AMRIGHT);
-	scr->wrap_occurred = false;
-
-	scr->scroll.top    = 0;
-	scr->scroll.bottom = term->lines - 1;
-
-	scr->cursor.x = scr->cursor.y = 0;
 
 	term->state.mode      = term->mode;
-	term->state.cursor    = scr->cursor;
 	term->state.attribute = ATTR_RESET;
 
+	/* BCE fills use the current background: reset it before the wipe. */
 	term->color_pair.fg = DEFAULT_FG;
 	term->color_pair.bg = DEFAULT_BG;
 
 	term->attribute = ATTR_RESET;
 
-	for (int line = 0; line < term->lines; line++) {
-		for (int col = 0; col < term->cols; col++) {
-			erase_cell(term, line, col);
-			if ((col % TABSTOP) == 0)
-				scr->tabstop[col] = true;
-			else
-				scr->tabstop[col] = false;
-		}
-		scr->line_dirty[line] = true;
-	}
+	screen_clear(term);
+	term->state.cursor = active_screen(term)->cursor;
 
 	reset_esc(term);
 	reset_charset(term);
@@ -293,31 +365,58 @@ void redraw(struct terminal_t *term)
 	statusbar_invalidate(); /* full redraws repaint the status strip too */
 }
 
+/* Alternate screen (DECALT, CSI ?1049h/l). scr[1] is allocated lazily on
+ * first entry and kept between excursions (~one cell matrix), but wiped on
+ * every entry: DECRLN semantics, the app always starts from a clean blank.
+ * The primary is never written to while the alt screen is resident, so
+ * only cursor + scroll margins need parking. Doubled or mismatched 1049s
+ * are no-ops. */
+void enter_alt_screen(struct terminal_t *term)
+{
+	struct screen_t *alt = &term->scr[1];
+
+	if (term->active == 1)
+		return;
+
+	term->alt_saved.cursor = active_screen(term)->cursor;
+	term->alt_saved.scroll = active_screen(term)->scroll;
+
+	if (!alt->allocated) {
+		if (!screen_matrix_alloc(term, alt)) {
+			logging(ERROR, "alternate screen: allocation failed, staying on primary\n");
+			return;
+		}
+	}
+
+	term->active = 1;
+	screen_clear(term);
+	sixel_canvas_free(term); /* the canvas must not straddle the switch */
+}
+
+void leave_alt_screen(struct terminal_t *term)
+{
+	struct screen_t *prim = &term->scr[0];
+
+	if (term->active != 1)
+		return;
+
+	term->active = 0;
+	prim->cursor = term->alt_saved.cursor;
+	prim->scroll = term->alt_saved.scroll;
+	sixel_canvas_free(term);
+	/* Repaint the restored primary over the app's frame: the FB pixels
+	 * still show the alt screen, so every primary line goes dirty. */
+	redraw(term);
+}
+
 void term_die(struct terminal_t *term)
 {
-	int i, j;
+	int i;
 
-	/* Free every screen that is backed by a cell matrix (the alternate
-	 * stays NULL until DECALT allocates it lazily). */
-	for (i = 0; i < 2; i++) {
-		struct screen_t *scr = &term->scr[i];
-
-		if (scr->cells) {
-			for (j = 0; j < term->lines; j++) {
-				if (scr->cells[j]) {
-					for (int k = 0; k < term->cols; k++)
-						cell_pixmap_clear(&scr->cells[j][k]);
-					free(scr->cells[j]);
-				}
-			}
-			free(scr->cells);
-			scr->cells = NULL;
-		}
-		free(scr->line_dirty);
-		scr->line_dirty = NULL;
-		free(scr->tabstop);
-		scr->tabstop = NULL;
-	}
+	/* Free every screen backed by a cell matrix (the alternate stays
+	 * NULL until DECALT allocates it lazily). */
+	for (i = 0; i < 2; i++)
+		screen_matrix_free(term, &term->scr[i]);
 
 	drcs_clear_all(term);
 	sixel_canvas_free(term);
@@ -345,31 +444,20 @@ bool term_init(struct terminal_t *term, int width, int height)
 
 	/* Screens: the primary (scr[0]) is the active one; the alternate
 	 * (scr[1]) stays reserved zeroed until DECALT allocates it lazily. */
-	term->active = 0;
-	term->scr[0] = (struct screen_t) {0};
-	term->scr[1] = (struct screen_t) {0};
+	term->active    = 0;
+	term->scr[0]    = (struct screen_t) {0};
+	term->scr[1]    = (struct screen_t) {0};
+	term->alt_saved = (struct alt_saved_t) {0};
 
 	/* allocate memory (primary screen only) */
-	term->scr[0].allocated  = true;
-	term->scr[0].line_dirty = (bool *) ecalloc(term->lines, sizeof(bool));
-	term->scr[0].tabstop    = (bool *) ecalloc(term->cols, sizeof(bool));
-	term->esc.buf           = (char *) ecalloc(1, term->esc.size);
-	term->sixel.pixmap      = NULL; /* lazy: sixel_canvas_ensure on first sixel */
+	term->esc.buf      = (char *) ecalloc(1, term->esc.size);
+	term->sixel.pixmap = NULL; /* lazy: sixel_canvas_ensure on first sixel */
 
 	memset(term->drcs, 0, sizeof(term->drcs));
 
-	term->scr[0].cells = (struct cell_t **) ecalloc(term->lines, sizeof(struct cell_t *));
-	if (!term->scr[0].line_dirty || !term->scr[0].tabstop
-		|| !term->scr[0].cells || !term->esc.buf) {
+	if (!term->esc.buf || !screen_matrix_alloc(term, &term->scr[0])) {
 		term_die(term);
 		return false;
-	}
-	for (int i = 0; i < term->lines; i++) {
-		term->scr[0].cells[i] = (struct cell_t *) ecalloc(term->cols, sizeof(struct cell_t));
-		if (!term->scr[0].cells[i]) {
-			term_die(term);
-			return false;
-		}
 	}
 
 	/* initialize palette */

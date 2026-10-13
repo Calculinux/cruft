@@ -1,9 +1,9 @@
 /* See LICENSE for licence details. */
+/* fb backend ioctls; the fb types (incl. the cmap_t typedef) come from
+ * fb/fb.h via fb/common.h. */
 #include <linux/fb.h>
 #include <linux/vt.h>
 #include <linux/kd.h>
-
-typedef struct fb_cmap cmap_t;
 
 enum {
 	CMAP_COLOR_LENGTH = sizeof(__u16) * BITS_PER_BYTE,

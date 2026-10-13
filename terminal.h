@@ -1,4 +1,6 @@
 /* See LICENSE for licence details. */
+#include "status.h"
+
 int set_cell(struct terminal_t *term, int y, int x, const struct glyph_t *glyphp)
 {
 	struct cell_t cell, *cellp;
@@ -278,6 +280,7 @@ void redraw(struct terminal_t *term)
 {
 	for (int i = 0; i < term->lines; i++)
 		term->line_dirty[i] = true;
+	statusbar_invalidate(); /* full redraws repaint the status strip too */
 }
 
 void term_die(struct terminal_t *term)
@@ -314,8 +317,11 @@ bool term_init(struct terminal_t *term, int width, int height)
 	term->width  = width;
 	term->height = height;
 
+	/* The optional status bar owns the top strip (statusbar_h() px);
+	 * the cell grid fills what remains below it. */
+	term->oy    = statusbar_h();
 	term->cols  = term->width / CELL_WIDTH;
-	term->lines = term->height / CELL_HEIGHT;
+	term->lines = (term->height - term->oy) / CELL_HEIGHT;
 
 	term->esc.size = ESCSEQ_SIZE;
 

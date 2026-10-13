@@ -1,4 +1,7 @@
-/* Demand-paged cruft font loader (CRUFTFN1; see tools/mkcruftfont.c). */
+/* Demand-paged cruft font loaders (CRUFTFN1; see tools/mkcruftfont.c).
+ * Two instances: the terminal font (glyph_mmap_*) and the small status
+ * bar font (glyph_sb_*, 4x8 only). Share the same blob format and page
+ * walker, independent metrics. */
 #define _XOPEN_SOURCE 600
 #include <errno.h>
 #include <fcntl.h>
@@ -22,23 +25,14 @@
 
 int g_cell_w;
 int g_cell_h;
-
-struct cruftfont_map {
-	uint8_t *map;
-	size_t size;
-	const uint8_t *page_dir; /* LE uint32[PAGE_COUNT] at map+24 */
-	uint32_t glyph_bytes;
-	uint32_t page_shift;
-	struct glyph_t tofu_half;
-	struct glyph_t tofu_wide;
-};
+int g_sb_cell_w;
+int g_sb_cell_h;
 
 static struct cruftfont_map gfont;
+static struct cruftfont_map gsbfont;
 
-static void make_tofu(struct glyph_t *g, uint32_t code, uint8_t width)
+static void make_tofu(struct glyph_t *g, uint32_t code, uint8_t width, int cw, int ch)
 {
-	int cw = g_cell_w;
-	int ch = g_cell_h;
 	uint16_t edge = (uint16_t)((1u << cw) - 1u);
 	uint16_t full = (uint16_t)((1u << (cw * 2)) - 1u);
 
@@ -66,6 +60,76 @@ static uint32_t read_u32_le(const uint8_t *p)
 	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static void map_unmap(struct cruftfont_map *m)
+{
+	if (m->map && m->map != MAP_FAILED)
+		munmap(m->map, m->size);
+}
+
+/* Core loader shared by the terminal and status fonts.
+ * Validates structure (size, magic, page_shift); metric suitability is
+ * judged by the caller, since each instance whitelists its own sizes.
+ * quiet: suppress diagnostics (the status font fails softly). */
+int cruftfont_map_init(struct cruftfont_map *m, const char *path, int quiet)
+{
+	int fd;
+	struct stat st;
+	const uint8_t *p;
+	uint32_t cell_w, cell_h, glyph_bytes, page_shift;
+
+	memset(m, 0, sizeof(*m));
+	if (!path || !path[0])
+		return 0;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		if (!quiet)
+			fprintf(stderr, "cruft: open %s: %s\n", path, strerror(errno));
+		return 0;
+	}
+	if (fstat(fd, &st) < 0 || st.st_size < (off_t)HEADER_MIN) {
+		if (!quiet)
+			fprintf(stderr, "cruft: bad font file %s\n", path);
+		close(fd);
+		return 0;
+	}
+	m->map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (m->map == MAP_FAILED) {
+		m->map = NULL;
+		if (!quiet)
+			fprintf(stderr, "cruft: mmap %s failed\n", path);
+		return 0;
+	}
+	m->size = (size_t)st.st_size;
+	p = m->map;
+	if (memcmp(p, CRUFTFONT_MAGIC, 8) != 0) {
+		if (!quiet)
+			fprintf(stderr, "cruft: bad magic in %s\n", path);
+		map_unmap(m);
+		memset(m, 0, sizeof(*m));
+		return 0;
+	}
+	cell_w = read_u32_le(p + 8);
+	cell_h = read_u32_le(p + 12);
+	glyph_bytes = read_u32_le(p + 16);
+	page_shift = read_u32_le(p + 20);
+	if (page_shift != PAGE_SHIFT_EXPECT) {
+		if (!quiet)
+			fprintf(stderr, "cruft: unsupported page_shift %u (want %u)\n",
+			page_shift, PAGE_SHIFT_EXPECT);
+		map_unmap(m);
+		memset(m, 0, sizeof(*m));
+		return 0;
+	}
+	m->cell_w = cell_w;
+	m->cell_h = cell_h;
+	m->glyph_bytes = glyph_bytes;
+	m->page_shift = page_shift;
+	m->page_dir = p + 24;
+	return 1;
+}
+
 static int metrics_ok(uint32_t cell_w, uint32_t cell_h, uint32_t glyph_bytes)
 {
 	/* glyph_bytes = 8 + cell_h * 2 (code/width/pad + uint16 rows) */
@@ -80,64 +144,26 @@ static int metrics_ok(uint32_t cell_w, uint32_t cell_h, uint32_t glyph_bytes)
 
 int glyph_mmap_init(const char *path)
 {
-	int fd;
-	struct stat st;
-	const uint8_t *p;
-	uint32_t cell_w, cell_h, glyph_bytes, page_shift;
-
 	if (!path || !path[0])
 		path = getenv("CRUFT_FONT");
 	if (!path || !path[0])
 		path = DEFAULT_FONT_PATH;
 
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		fprintf(stderr, "cruft: open %s: %s\n", path, strerror(errno));
-		return 0;
-	}
-	if (fstat(fd, &st) < 0 || st.st_size < (off_t)HEADER_MIN) {
-		fprintf(stderr, "cruft: bad font file %s\n", path);
-		close(fd);
-		return 0;
-	}
-	gfont.map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-	close(fd);
-	if (gfont.map == MAP_FAILED) {
-		gfont.map = NULL;
-		fprintf(stderr, "cruft: mmap %s failed\n", path);
-		return 0;
-	}
-	gfont.size = (size_t)st.st_size;
-	p = gfont.map;
-	if (memcmp(p, CRUFTFONT_MAGIC, 8) != 0) {
-		fprintf(stderr, "cruft: bad magic in %s\n", path);
+	if (!cruftfont_map_init(&gfont, path, 0)) {
 		glyph_mmap_die();
 		return 0;
 	}
-	cell_w = read_u32_le(p + 8);
-	cell_h = read_u32_le(p + 12);
-	glyph_bytes = read_u32_le(p + 16);
-	page_shift = read_u32_le(p + 20);
-	if (page_shift != PAGE_SHIFT_EXPECT) {
-		fprintf(stderr, "cruft: unsupported page_shift %u (want %u)\n",
-			page_shift, PAGE_SHIFT_EXPECT);
-		glyph_mmap_die();
-		return 0;
-	}
-	if (!metrics_ok(cell_w, cell_h, glyph_bytes)) {
+	if (!metrics_ok(gfont.cell_w, gfont.cell_h, gfont.glyph_bytes)) {
 		fprintf(stderr,
 			"cruft: unsupported font metrics %ux%u/%u (want 4x8/24, 6x12/32, or 8x16/40)\n",
-			cell_w, cell_h, glyph_bytes);
+			gfont.cell_w, gfont.cell_h, gfont.glyph_bytes);
 		glyph_mmap_die();
 		return 0;
 	}
-	g_cell_w = (int)cell_w;
-	g_cell_h = (int)cell_h;
-	gfont.glyph_bytes = glyph_bytes;
-	gfont.page_shift = page_shift;
-	gfont.page_dir = p + 24;
-	make_tofu(&gfont.tofu_half, 0x003F, 1);
-	make_tofu(&gfont.tofu_wide, 0x3000, 2);
+	g_cell_w = (int)gfont.cell_w;
+	g_cell_h = (int)gfont.cell_h;
+	make_tofu(&gfont.tofu_half, 0x003F, 1, g_cell_w, g_cell_h);
+	make_tofu(&gfont.tofu_wide, 0x3000, 2, g_cell_w, g_cell_h);
 
 	if (!glyph_lookup(0x0020) || !glyph_lookup(0x3000) || !glyph_lookup(0x003F)) {
 		fprintf(stderr, "cruft: essential glyphs missing from font\n");
@@ -150,36 +176,80 @@ int glyph_mmap_init(const char *path)
 
 void glyph_mmap_die(void)
 {
-	if (gfont.map && gfont.map != MAP_FAILED)
-		munmap(gfont.map, gfont.size);
+	map_unmap(&gfont);
 	memset(&gfont, 0, sizeof(gfont));
 	g_cell_w = 0;
 	g_cell_h = 0;
 }
 
-const struct glyph_t *glyph_lookup(uint32_t code)
+/* The status bar renders in one 4x8 line of the miniwi font; other metrics
+ * would desynchronize the strip from the font. Soft failure: a missing
+ * blob simply disables the bar, a corrupt one warns. */
+int glyph_sb_init(const char *path)
+{
+	if (!cruftfont_map_init(&gsbfont, path, 1))
+		return 0;
+	if (gsbfont.cell_w != 4 || gsbfont.cell_h != 8 || gsbfont.glyph_bytes != 24) {
+		fprintf(stderr,
+			"cruft: status font %s has unsupported metrics %ux%u (want 4x8/24)\n",
+			path, gsbfont.cell_w, gsbfont.cell_h);
+		glyph_sb_die();
+		return 0;
+	}
+	if (!glyph_sb_lookup(0x0020)) {
+		fprintf(stderr, "cruft: status font %s lacks a space glyph\n", path);
+		glyph_sb_die();
+		return 0;
+	}
+	g_sb_cell_w = (int)gsbfont.cell_w;
+	g_sb_cell_h = (int)gsbfont.cell_h;
+	return 1;
+}
+
+void glyph_sb_die(void)
+{
+	map_unmap(&gsbfont);
+	memset(&gsbfont, 0, sizeof(gsbfont));
+	g_sb_cell_w = 0;
+	g_sb_cell_h = 0;
+}
+
+static const struct glyph_t *map_lookup(const struct cruftfont_map *m,
+					uint32_t code)
 {
 	uint32_t page, idx, page_off, off;
 	const uint8_t *sub;
 
-	if (code >= UCS2_CHARS || !gfont.map || !gfont.page_dir)
+	if (code >= UCS2_CHARS || !m->map || !m->page_dir)
 		return NULL;
 
-	page = code >> gfont.page_shift;
-	idx = code & ((1u << gfont.page_shift) - 1u);
+	page = code >> m->page_shift;
+	idx = code & ((1u << m->page_shift) - 1u);
 	if (page >= PAGE_COUNT)
 		return NULL;
 
-	page_off = read_u32_le(gfont.page_dir + page * 4);
-	if (page_off == 0 || page_off + PAGE_COUNT * 4 > gfont.size)
+	page_off = read_u32_le(m->page_dir + page * 4);
+	if (page_off == 0 || page_off + PAGE_COUNT * 4 > m->size)
 		return NULL;
 
-	sub = gfont.map + page_off;
+	sub = m->map + page_off;
 	off = read_u32_le(sub + idx * 4);
-	if (off == 0 || off + gfont.glyph_bytes > gfont.size)
+	if (off == 0 || off + m->glyph_bytes > m->size)
 		return NULL;
 
-	return (const struct glyph_t *)(gfont.map + off);
+	return (const struct glyph_t *)(m->map + off);
+}
+
+const struct glyph_t *glyph_lookup(uint32_t code)
+{
+	return map_lookup(&gfont, code);
+}
+
+const struct glyph_t *glyph_sb_lookup(uint32_t code)
+{
+	/* Deliberately no tofu substitute: chrome must render nothing for a
+	 * missing glyph, not a box. */
+	return map_lookup(&gsbfont, code);
 }
 
 const struct glyph_t *glyph_get(uint32_t code)

@@ -4,6 +4,7 @@
 #include "conf.h"
 #include "util.h"
 #include "fb/common.h"
+#include "status.h"
 #include "terminal.h"
 #include "ctrlseq/esc.h"
 #include "ctrlseq/csi.h"
@@ -183,6 +184,10 @@ int main(int argc, char *const argv[])
 		goto glyph_init_failed;
 	}
 
+	/* Optional status bar in the top margin; no-op when the status
+	 * font or config is unavailable. term_init reads statusbar_h(). */
+	statusbar_init();
+
 	if (!term_init(&term, fb.info.width, fb.info.height)) {
 		logging(FATAL, "terminal initialize failed\n");
 		goto term_init_failed;
@@ -248,11 +253,19 @@ int main(int argc, char *const argv[])
 				refresh(&fb, &term);
 			}
 		}
+
+		/* the clock/battery tick while the pty is idle (refresh() only
+		 * runs on activity); statusbar_render's once-per-second gate
+		 * and content compare keep this cheap. Not while inactive:
+		 * a BACKGROUND_DRAW owner has the screen. */
+		if (vt_active)
+			statusbar_render(&fb, &term);
 	}
 
 	/* normal exit */
 	tty_die(&termios_orig);
 	term_die(&term);
+	statusbar_die();
 	glyph_mmap_die();
 	fb_die(&fb);
 	return EXIT_SUCCESS;
@@ -261,6 +274,7 @@ int main(int argc, char *const argv[])
 tty_init_failed:
 	term_die(&term);
 term_init_failed:
+	statusbar_die();
 	glyph_mmap_die();
 glyph_init_failed:
 	fb_die(&fb);

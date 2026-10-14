@@ -4,7 +4,8 @@
  * Second image path next to sixel: clients that speak the kitty graphics
  * protocol (kitten icat, catimg, chafa -O kitty) send images as
  *     ESC ] 1337 ; File ; key=value ... ; PAYLOAD (BEL|ST)
- * with PAYLOAD being raw BGR/BGRA pixels, optionally base64-encoded.
+ * with PAYLOAD being raw BGR/BGRA pixels, optionally base64-encoded, or
+ * PNG (PNG only when built against the system libpng, see makefile).
  *
  * Placements land on the same sparse per-cell pixmaps as sixel
  * (erase_cell + cell_pixmap_ensure + the sixel_copy2cell-style
@@ -27,6 +28,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef HAVE_LIBPNG
+#include <png.h>
+#endif
+
 /* move_cursor / set_cursor / cr live in terminal.h (unity from cruft.c). */
 void move_cursor(struct terminal_t *term, int y_offset, int x_offset);
 void set_cursor(struct terminal_t *term, int y, int x);
@@ -43,6 +48,8 @@ void cr(struct terminal_t *term);
 #define KITTY_MAX_PAYLOAD (8u * 1024u * 1024u)
 #define KITTY_TRANSFER_ID_MAX 60
 #define KITTY_MAX_FIELDS 16
+
+static const uint8_t png_magic[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
 
 static int b64_val(int c)
 {
@@ -311,6 +318,18 @@ int kitty_args_parse(const char *payload, struct kitty_args *ka)
 	return 0;
 }
 
+/* TRUE only when built against libpng: the makefile probe verified both
+ * the header and the high-level png_image API symbols, so no further
+ * feature-testing is needed (plain libpng 1.6 ships it unconditionally). */
+bool kitty_png_available(void)
+{
+#ifdef HAVE_LIBPNG
+	return true;
+#else
+	return false;
+#endif
+}
+
 /*
  * Fit a sw x sh source into avail_w x avail_h px: scale down uniformly
  * when preserve_aspect, else 1:1 cropped to the available region. Results
@@ -369,6 +388,129 @@ static void raw_expand(const uint8_t *raw, int sw, int sh, unsigned ch,
 			out[(size_t) y * (size_t) tw + (size_t) x] = (r << 16) | (g << 8) | b;
 		}
 	}
+}
+
+/* Composite an RGBA buffer (what libpng hands us) the same way.
+ * Only reachable in a libpng build. */
+#ifdef HAVE_LIBPNG
+static void rgba_composite(const uint8_t *rgba, int tw, int th, int transparent,
+			   uint32_t bg, uint32_t *out)
+{
+	for (int i = 0; i < tw * th; i++) {
+		uint32_t r = rgba[i * 4 + 0];
+		uint32_t g = rgba[i * 4 + 1];
+		uint32_t b = rgba[i * 4 + 2];
+		uint32_t a = rgba[i * 4 + 3];
+
+		if (a < 255 && transparent) {
+			r = (r * a + (bg >> 16) * (255 - a)) / 255;
+			g = (g * a + (bg >> 8) * (255 - a)) / 255;
+			b = (b * a + (bg & 0xFF) * (255 - a)) / 255;
+		}
+		out[i] = (r << 16) | (g << 8) | b;
+	}
+}
+#endif /* HAVE_LIBPNG */
+
+/*
+ * Decode a PNG payload via the libpng high-level API into 0x00RRGGBB
+ * (aspect-preserving fit into the region below/right of the cursor).
+ * *img_out is malloc'd on success.
+ */
+static int png_decode(const uint8_t *raw, size_t n, struct terminal_t *term,
+		      int transparent, uint32_t bg, int *tw, int *th, uint32_t **img)
+{
+#ifdef HAVE_LIBPNG
+	/* png_image is a typedef of an anonymous struct in libpng */
+	png_image pi;
+	uint32_t *rgba = NULL;
+	uint32_t *scaled = NULL;
+	uint32_t *out = NULL;
+	int rw, rh, rc, x0, y0, aw, ah;
+
+	memset(&pi, 0, sizeof(pi));
+	pi.version = PNG_IMAGE_VERSION;
+	rc = png_image_begin_read_from_memory(&pi, raw, n);
+	if (rc <= 0) { /* 0 = error (-1 = warned, succeeded) */
+		if (rc == 0)
+			png_image_free(&pi);
+		return -1;
+	}
+	/* begin_read() overwrites 'format' with the source description:
+	 * programme the requested conversion only after it, per the API
+	 * docs - setting it before the call is silently discarded. */
+	pi.format = PNG_FORMAT_RGBA;
+
+	/* trust the natural size encoded in the PNG over any w/h the
+	 * client claims */
+	rw = (int) pi.width;
+	rh = (int) pi.height;
+	if (rw < 1 || rh < 1 ||
+	    (unsigned long long) rw * (unsigned long long) rh > KITTY_MAX_PIXELS) {
+		fprintf(stderr, "cruft: kitty_image: PNG exceeds %u px budget\n",
+			KITTY_MAX_PIXELS);
+		png_image_free(&pi);
+		return -1;
+	}
+
+	x0 = term->cursor.x * CELL_WIDTH;
+	y0 = term->cursor.y * CELL_HEIGHT;
+	aw = term->width - x0;
+	ah = term->height - y0;
+	if (aw < 1 || ah < 1) {
+		png_image_free(&pi);
+		return -1;
+	}
+	kitty_fit(rw, rh, aw, ah, 1, tw, th); /* aspect kept for rasters */
+
+	rgba = (uint32_t *) malloc((size_t) rw * (size_t) rh * 4);
+	if (!rgba) {
+		fprintf(stderr, "cruft: kitty_image: alloc failed\n");
+		png_image_free(&pi);
+		return -1;
+	}
+	rc = png_image_finish_read(&pi, NULL, rgba, rw * 4, NULL);
+	png_image_free(&pi);
+	if (rc < 1) {
+		free(rgba);
+		return -1;
+	}
+
+	/* the simplified libpng API decodes at natural size only: shrink
+	 * ourselves (nearest neighbour, like the raw path) into the fitted
+	 * region - never upscale */
+	if (*tw != rw || *th != rh) {
+		scaled = (uint32_t *) malloc((size_t) *tw * (size_t) *th * 4);
+		if (!scaled) {
+			fprintf(stderr, "cruft: kitty_image: alloc failed\n");
+			free(rgba);
+			return -1;
+		}
+		for (int y = 0; y < *th; y++)
+			for (int x = 0; x < *tw; x++)
+				memcpy(scaled + (size_t) y * (size_t) *tw + x,
+				       rgba + ((size_t) (y * rh / *th) * (size_t) rw
+					       + (size_t) (x * rw / *tw)),
+				       4);
+		free(rgba);
+		rgba = scaled;
+	}
+
+	out = (uint32_t *) malloc((size_t) *tw * (size_t) *th * BYTES_PER_PIXEL);
+	if (!out) {
+		free(rgba);
+		fprintf(stderr, "cruft: kitty_image: alloc failed\n");
+		return -1;
+	}
+	rgba_composite((const uint8_t *) rgba, *tw, *th, transparent, bg, out);
+	free(rgba);
+	*img = out;
+	return 0;
+#else
+	(void) raw; (void) n; (void) term; (void) transparent; (void) bg;
+	(void) tw; (void) th; (void) img;
+	return -1;
+#endif
 }
 
 /*
@@ -445,7 +587,7 @@ static void kitty_file_render(struct terminal_t *term, const struct kitty_args *
 	uint32_t bg;
 	struct screen_t *scr;
 	size_t raw_cap, raw_len = 0;
-	int x0, y0, aw, ah, sw, sh, tw = 0, th = 0;
+	int is_png, x0, y0, aw, ah, sw, sh, tw = 0, th = 0;
 
 	if (!term)
 		return;
@@ -475,6 +617,8 @@ static void kitty_file_render(struct terminal_t *term, const struct kitty_args *
 		raw_len = ka->data_len;
 	}
 
+	is_png = (raw_len >= sizeof(png_magic) &&
+		  memcmp(raw, png_magic, sizeof(png_magic)) == 0);
 	bg = term->virtual_palette[term->color_pair.bg];
 	x0 = scr->cursor.x * CELL_WIDTH;
 	y0 = scr->cursor.y * CELL_HEIGHT;
@@ -482,6 +626,20 @@ static void kitty_file_render(struct terminal_t *term, const struct kitty_args *
 	ah = term->height - y0;
 	if (aw < 1 || ah < 1)
 		goto out; /* cursor outside the grid: nothing to anchor to */
+
+	if (is_png) {
+		/* cppcheck sees the HAVE_LIBPNG branch: the note path is
+		 * dead there, live in no-libpng builds */
+		// cppcheck-suppress knownConditionTrueFalse
+		if (!kitty_png_available()) {
+			fprintf(stderr,
+				"cruft: kitty_image: PNG payload dropped (built without libpng)\n");
+			goto out;
+		}
+		if (png_decode(raw, raw_len, term, ka->transparency, bg, &tw, &th, &img) < 0)
+			goto out;
+		goto place;
+	}
 
 	/* raw BGR / BGRA: w/h are mandatory for raw streams */
 	sw = (int) ka->width;
@@ -510,6 +668,7 @@ static void kitty_file_render(struct terminal_t *term, const struct kitty_args *
 		   (raw_len >= (size_t) sw * sh * 4) ? 4u: 3u,
 		   ka->transparency, bg, tw, th, img);
 
+place:
 	kitty_place(term, img, tw, th);
 out:
 	free(raw);

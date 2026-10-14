@@ -18,6 +18,23 @@ in the centre, and a backlight meter and battery indicator on the
 right. A segment whose data source is absent (bare hardware, VM) is
 hidden; a missing or unsuitable status font disables the bar entirely
 and the grid reclaims the full screen.
+.PP
+Images are shown through two protocols that land on the same sparse
+per-cell pixmaps: sixel (device control sequence 62 t) and the kitty
+graphics protocol (OSC 1337). The kitty path accepts \fIFile ;\fP
+transfers of raw BGR/BGRA pixels (dimensions required) and of PNG
+images, when the binary was built against the system libpng (detected
+automatically; force the decision with
+.B HAVE_PNG=0
+or
+.BR HAVE_PNG=1 ).
+Decoded images are capped at 512x512 pixels, anchored at the cursor,
+shrunk (aspect-preserving) to fit the remaining grid, and never scroll
+the screen. \fIImage ;\fP operators (query, delete, chunked upload, ...)
+are not implemented but are always answered with an
+.I ok=false
+\fIRep\fP reply, so clients that probe for them degrade instead of
+hanging.
 .SH CUSTOMIZATION
 .PP
 Rewrite conf.h before make.

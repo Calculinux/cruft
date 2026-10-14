@@ -137,3 +137,15 @@ $ make yaft
 	FORCE_TEXT_MODE: need this option for switching from X to yaft
 -	various bug fixes
 	-	mkfont_bdf was broken (not affect SUBSTITUTE_WIDE/REPLACEMENT_CHAR)
+
+## 2026-10-13
+-	calculinux: status bar
+	-	top strip above the cell grid: wifi stair, clock, backlight
+		meter, battery (rendered in the 4x8 status font, e.g. miniwi)
+	-	second font instance (glyph_sb_*) reusing the CRUFTFN1 loader
+	-	state readers: sysfs power_supply/backlight/net + nl80211 signal
+	-	config: CRUFT_SB (segments), CRUFT_SB_12H (12h clock),
+		CRUFT_SB_FONT (font path); compile default sb_default_segments
+	-	fb type shapes split out to fb/fb.h; margin painting leaves
+		the status strip to the bar
+	-	wall mode: per-line shadow flush honours the oy grid origin

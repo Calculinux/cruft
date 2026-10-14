@@ -1,50 +1,20 @@
 /* See LICENSE for licence details. */
-/* common framebuffer struct/enum */
-enum fb_type_t {
-	YAFT_FB_TYPE_PACKED_PIXELS = 0,
-	YAFT_FB_TYPE_PLANES,
-	YAFT_FB_TYPE_UNKNOWN,
-};
-
-enum fb_visual_t {
-	YAFT_FB_VISUAL_TRUECOLOR = 0,
-	YAFT_FB_VISUAL_DIRECTCOLOR,
-	YAFT_FB_VISUAL_PSEUDOCOLOR,
-	YAFT_FB_VISUAL_UNKNOWN,
-};
-
-struct fb_info_t {
-	struct bitfield_t {
-		int length;
-		int offset;
-	} red, green, blue;
-	int width, height;       /* display resolution */
-	long screen_size;        /* screen data size (byte) */
-	int line_length;         /* line length (byte) */
-	int bytes_per_pixel;
-	int bits_per_pixel;
-	enum fb_type_t type;
-	enum fb_visual_t visual;
-	int reserved;            /* os specific data */
-};
+/* common framebuffer types (fb/fb.h), then the fb backend functions.
+ * The backend functions below are definitions, not prototypes: exactly
+ * one TU (cruft.c) may include this header for the main binary. */
+#include "fb.h"
 
 /* os dependent typedef/include (Calculinux/cruft: Linux only) */
 #include "linux.h"
 
-struct framebuffer_t {
-	int fd;                        /* file descriptor of framebuffer */
-	uint8_t *fp;                   /* pointer of framebuffer */
-	uint8_t *buf;                  /* copy of framebuffer (NULL unless wallpaper) */
-	uint8_t *wall;                 /* buffer for wallpaper */
-	uint32_t real_palette[COLORS]; /* hardware specific color palette */
-	struct fb_info_t info;
-	cmap_t *cmap, *cmap_orig;
-};
-
-static inline uint8_t *fb_draw_dest(struct framebuffer_t *fb)
-{
-	return fb->buf ? fb->buf : fb->fp;
-}
+/* Status bar (status.c, status.h) hooks. Declared here rather than
+ * including status.h: fb/ is a subdir of the quote-include path and the
+ * build does not add -I. (the Yocto recipe overrides CFLAGS wholesale).
+ * Keep in sync with status.h. Consumers include cruft.h first, so
+ * struct terminal_t is already defined. */
+int statusbar_h(void);
+void statusbar_render(struct framebuffer_t *fb, struct terminal_t *term);
+void statusbar_invalidate(void);
 
 /* common framebuffer functions */
 uint8_t *load_wallpaper(uint8_t *fp, long screen_size)
@@ -149,24 +119,6 @@ bool cmap_init(int fd, struct fb_info_t *info, cmap_t *cmap, int colors, int len
 
 	return true;
 }
-
-static inline uint32_t color2pixel(struct fb_info_t *info, uint32_t color)
-{
-	uint32_t r, g, b;
-
-	r = bit_mask[BITS_PER_RGB] & (color >> (BITS_PER_RGB * 2));
-	g = bit_mask[BITS_PER_RGB] & (color >>  BITS_PER_RGB);
-	b = bit_mask[BITS_PER_RGB] & (color >>  0);
-
-	r = r >> (BITS_PER_RGB - info->red.length);
-	g = g >> (BITS_PER_RGB - info->green.length);
-	b = b >> (BITS_PER_RGB - info->blue.length);
-
-	return (r << info->red.offset)
-			+ (g << info->green.offset)
-			+ (b << info->blue.offset);
-}
-
 
 bool init_truecolor(struct fb_info_t *info, cmap_t **cmap, cmap_t **cmap_orig)
 {
@@ -367,10 +319,11 @@ void fb_die(struct framebuffer_t *fb)
 
 /*
  * Grid is centered horizontally so the leftover (width - cols*CELL_WIDTH)
- * pixels are split between the left and right edges. Rows stay
- * top-anchored (oy = 0), matching kernel fbcon. The same offset must be
- * applied to text (draw_line) and sixel blits (draw_sixel) or sixel
- * content lands rem/2 px left of the adjacent glyphs.
+ * pixels are split between the left and right edges. Vertically the grid
+ * sits below the status bar strip: rows are anchored at term->oy (0 when
+ * the bar is off, one status-font line when it is on). The same origins
+ * must be applied to text (draw_line) and sixel blits (draw_sixel) or
+ * sixel content lands offset from the adjacent glyphs.
  */
 static inline int grid_origin_x(const struct terminal_t *term)
 {
@@ -379,16 +332,18 @@ static inline int grid_origin_x(const struct terminal_t *term)
 
 /*
  * Paint the pixels the cell grid never covers: left/right edge strips
- * (width - cols*CELL_WIDTH, split around grid_origin_x) and the bottom
- * strip (height - lines*CELL_HEIGHT). Contents: wallpaper when present,
- * else the default background. Upstream yaft hid this by always flushing
- * a zeroed full-screen shadow; direct-draw mode has no shadow, so the
- * strips must be written explicitly or stale framebuffer contents
- * (kernel boot log, previous VT) survive in them.
+ * (width - cols*CELL_WIDTH, split around grid_origin_x), the bottom
+ * strip (height - oy - lines*CELL_HEIGHT), and the top strip (0..oy) —
+ * except when the status bar owns the top strip (statusbar_h() > 0):
+ * it paints that region itself, so leave it to the bar. Contents:
+ * wallpaper when present, else the default background. Upstream yaft
+ * hid this by always flushing a zeroed full-screen shadow; direct-draw
+ * mode has no shadow, so the strips must be written explicitly or stale
+ * framebuffer contents (kernel boot log, previous VT) survive in them.
  */
 static void fb_paint_margin(struct framebuffer_t *fb, struct terminal_t *term)
 {
-	int ox, grid_w, grid_h, x, y;
+	int ox, oy, grid_w, grid_h, x, y;
 	int rem_left, rem_right;
 	uint32_t bgpix = fb->real_palette[DEFAULT_BG];
 	uint8_t *dest = fb_draw_dest(fb);
@@ -396,17 +351,23 @@ static void fb_paint_margin(struct framebuffer_t *fb, struct terminal_t *term)
 	int ll = fb->info.line_length;
 
 	ox = grid_origin_x(term);
+	oy = term->oy;
 	grid_w = term->cols * CELL_WIDTH;
 	grid_h = term->lines * CELL_HEIGHT;
 	rem_left = ox;
 	rem_right = term->width - ox - grid_w;
-	if (rem_left <= 0 && rem_right <= 0 && grid_h >= term->height)
+	/* Nothing to paint: no side strips and the grid reaches the bottom.
+	 * (A top strip only exists when the bar is on, and the bar paints it
+	 * itself, so it is not a reason to run the loop.) */
+	if (rem_left <= 0 && rem_right <= 0 && grid_h >= term->height - oy)
 		return;
 
 	for (y = 0; y < term->height; y++) {
-		int bot_strip = (y >= grid_h);
+		int bot_strip = (y >= oy + grid_h);
 		int x_end;
 
+		if (y < oy && statusbar_h() > 0)
+			continue; /* status bar owns the top strip */
 		if (bot_strip)
 			x_end = term->width;
 		else {
@@ -433,9 +394,11 @@ static void fb_paint_margin(struct framebuffer_t *fb, struct terminal_t *term)
 	 * uncovered strips to the display ourselves. The side margins in
 	 * particular ride along with dirty-row blits only; a refresh() with
 	 * no dirty rows (e.g. cursor hidden) would otherwise leave stale
-	 * pixels in the visible margins after contamination. */
+	 * pixels in the visible margins after contamination. Rows above the
+	 * status strip (y < oy) are owned by the bar, which flushes them
+	 * itself. */
 	if (fb->buf) {
-		for (y = 0; y < term->height; y++) {
+		for (y = oy; y < term->height; y++) {
 			if (rem_left > 0)
 				memcpy(fb->fp + (long)y * ll, fb->buf + (long)y * ll,
 					(long)rem_left * bpp);
@@ -444,9 +407,9 @@ static void fb_paint_margin(struct framebuffer_t *fb, struct terminal_t *term)
 					fb->buf + (long)y * ll + (long)(ox + grid_w) * bpp,
 					(long)rem_right * bpp);
 		}
-		if (grid_h < term->height)
-			memcpy(fb->fp + (long)grid_h * ll, fb->buf + (long)grid_h * ll,
-				(long)(term->height - grid_h) * ll);
+		if (grid_h < term->height - oy)
+			memcpy(fb->fp + (long)(oy + grid_h) * ll, fb->buf + (long)(oy + grid_h) * ll,
+				(long)(term->height - oy - grid_h) * ll);
 	}
 }
 
@@ -467,7 +430,7 @@ static inline void draw_sixel(struct framebuffer_t *fb, struct terminal_t *term,
 			src_offset = BYTES_PER_PIXEL * (h * CELL_WIDTH + w);
 			memcpy(&color, pixmap + src_offset, BYTES_PER_PIXEL);
 
-			dst_offset = (line * CELL_HEIGHT + h) * fb->info.line_length
+			dst_offset = (term->oy + line * CELL_HEIGHT + h) * fb->info.line_length
 				+ (ox + col * CELL_WIDTH + w) * fb->info.bytes_per_pixel;
 			pixel = color2pixel(&fb->info, color);
 			memcpy(dest + dst_offset, &pixel, fb->info.bytes_per_pixel);
@@ -527,7 +490,7 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 				 * baked in the full leftover on the left; centered grids
 				 * must use the explicit ox + col*CELL_WIDTH form.) */
 				pos = (ox + col * CELL_WIDTH + (CELL_WIDTH - 1 - w)) * fb->info.bytes_per_pixel
-					+ (line * CELL_HEIGHT + h) * fb->info.line_length;
+					+ (term->oy + line * CELL_HEIGHT + h) * fb->info.line_length;
 
 				/* set color palette */
 				if (cellp->glyphp->bitmap[h] & (0x01 << (bit_base + w)))
@@ -543,9 +506,12 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 		}
 	}
 
-	/* actual display update (bit blit) — skip when drawing direct to fp */
+	/* actual display update (bit blit) — skip when drawing direct to fp.
+	 * The grid rows were painted at the oy-shifted origin (row 0 sits
+	 * below the status strip when the bar is on), so flush that band;
+	 * with oy == 0 this is the historical form. */
 	if (fb->buf) {
-		pos = (line * CELL_HEIGHT) * fb->info.line_length;
+		pos = (term->oy + line * CELL_HEIGHT) * fb->info.line_length;
 		size = CELL_HEIGHT * fb->info.line_length;
 		memcpy(fb->fp + pos, fb->buf + pos, size);
 	}
@@ -566,12 +532,14 @@ void refresh(struct framebuffer_t *fb, struct terminal_t *term)
 		term->palette_modified = false;
 		for (int i = 0; i < COLORS; i++)
 			fb->real_palette[i] = color2pixel(&fb->info, term->virtual_palette[i]);
+		statusbar_invalidate(); /* strip colors come from the palette */
 	}
 
 	if (term->mode & MODE_CURSOR)
 		term->line_dirty[term->cursor.y] = true;
 
-	/* Edge strips the grid never covers (left/right/bottom margins). */
+	/* Edge strips the grid never covers (left/right/bottom margins; the
+	 * top strip is the status bar's when it is on). */
 	fb_paint_margin(fb, term);
 
 	for (int line = 0; line < term->lines; line++) {
@@ -579,4 +547,7 @@ void refresh(struct framebuffer_t *fb, struct terminal_t *term)
 			draw_line(fb, term, line);
 		}
 	}
+
+	/* Status bar in the top strip (no-op when disabled) */
+	statusbar_render(fb, term);
 }

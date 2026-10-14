@@ -28,10 +28,16 @@ const char *term_name = "cruft-256color";
 /* Linux framebuffer console only */
 const char *fb_path = "/dev/fb0";
 const char *shell_cmd = "/bin/bash";
+
+/* Status bar: compile-time default segments; CRUFT_SB env (via
+ * /etc/default/console) overrides per session. Names: time, wifi,
+ * battery, brightness (also "all" / "none" / "0"). */
+const char *sb_default_segments = "all";
 #else
 extern const char *term_name;
 extern const char *fb_path;
 extern const char *shell_cmd;
+extern const char *sb_default_segments;
 #endif
 
 #endif /* CRUFT_CONF_H */

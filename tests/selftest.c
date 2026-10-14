@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CRUFT_NO_GLOBALS
@@ -15,6 +16,7 @@
 #include "conf.h"
 #include "util.h"
 #include "fb/common.h"
+#include "status.h"
 
 const uint32_t color_list[COLORS];
 
@@ -35,6 +37,7 @@ struct termios termios_orig;
 const char *term_name = "cruft-256color";
 const char *fb_path = "/dev/fb0";
 const char *shell_cmd = "/bin/bash";
+const char *sb_default_segments = "all";
 
 /* sixel_copy2cell also calls these (scroll/CR not under test here) */
 void move_cursor(struct terminal_t *term, int y_offset, int x_offset)
@@ -250,6 +253,88 @@ static int write_tiny_font6x12(const char *path)
 	fputc(2, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
 	for (i = 0; i < 12; i++)
 		write_u16(fp, 0);
+
+	fclose(fp);
+	return 0;
+}
+
+/* Glyph table for the sb test font: space (blank) + solid 4x8 glyphs
+ * (0xffff on every row) so pixel assertions stay trivial. Covers all
+ * icons sb_have_icons() checks, the clock, and the %/[] text. */
+static const uint32_t sb_cp[] = {
+	0x20, '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+	':', '[', ']', '%',
+	0x2191, 0x2193,
+	0x2581, 0x2582, 0x2584, 0x2586,
+	0x258f, 0x258e, 0x258d, 0x258c, 0x258b, 0x258a, 0x2589, 0x2588,
+};
+#define SB_CP_N (int)(sizeof sb_cp / sizeof sb_cp[0])
+
+static int sb_page_used(uint32_t page)
+{
+	for (int k = 0; k < SB_CP_N; k++)
+		if (sb_cp[k] >> 8 == page)
+			return 1;
+	return 0;
+}
+
+static int sb_pages_before(uint32_t page)
+{
+	int c = 0;
+
+	for (uint32_t q = 0; q < page; q++)
+		if (sb_page_used(q))
+			c++;
+	return c;
+}
+
+/* Build a tiny CRUFTFN1 4x8 status font from sb_cp[] */
+static int write_tiny_sb4x8(const char *path)
+{
+	FILE *fp;
+	const size_t hdrsz = 8 + 16 + 256u * 4u;
+	const uint32_t rec = 24;
+	uint32_t glyphbase, p;
+	int npages = 0;
+
+	for (p = 0; p < 256; p++)
+		if (sb_page_used(p))
+			npages++;
+	glyphbase = (uint32_t)hdrsz + (uint32_t)npages * 256 * 4;
+
+	fp = fopen(path, "wb");
+	if (!fp)
+		return -1;
+
+	fwrite("CRUFTFN1", 1, 8, fp);
+	write_u32(fp, 4);
+	write_u32(fp, 8);
+	write_u32(fp, rec);
+	write_u32(fp, 8);
+
+	for (p = 0; p < 256; p++)
+		write_u32(fp, sb_page_used(p)
+			? (uint32_t)hdrsz + (uint32_t)sb_pages_before(p) * 1024u: 0);
+
+	for (p = 0; p < 256; p++) {
+		if (!sb_page_used(p))
+			continue;
+		for (int i = 0; i < 256; i++) {
+			uint32_t off = 0;
+
+			for (int k = 0; k < SB_CP_N; k++)
+				if (sb_cp[k] == ((p << 8) | (uint32_t)i))
+					off = glyphbase + (uint32_t)k * rec;
+			write_u32(fp, off);
+		}
+	}
+
+	for (int k = 0; k < SB_CP_N; k++) {
+		write_u32(fp, sb_cp[k]);
+		fputc(1, fp); fputc(0, fp); fputc(0, fp); fputc(0, fp);
+		for (int r = 0; r < 8; r++)
+			write_u16(fp, (k == 0) ? 0: 0xffff);
+	}
 
 	fclose(fp);
 	return 0;
@@ -582,6 +667,437 @@ int main(void)
 			free_term_cells(&term);
 			free(mfp);
 			glyph_mmap_die();
+		}
+	}
+
+	/* N: status bar font (4x8) loads alongside the main font */
+	{
+		char tmnf[] = "/tmp/cruft-st-N-XXXXXX";
+		char nfont[80], nbad[80];
+		int fnf = mkstemp(tmnf);
+
+		expect(fnf >= 0, "N mkstemp");
+		if (fnf >= 0) {
+			close(fnf);
+			snprintf(nfont, sizeof nfont, "%s.sb", tmnf);
+			snprintf(nbad, sizeof nbad, "%s.main6x12", tmnf);
+			expect(write_tiny_sb4x8(nfont) == 0, "N write sb font");
+			expect(write_tiny_font6x12(nbad) == 0, "N write 6x12 font");
+			expect(glyph_mmap_init(nbad) == 1, "N main font 6x12");
+			expect(glyph_sb_init(nfont) == 1, "N sb font 4x8");
+			expect(g_cell_w == 6 && g_cell_h == 12, "N main metrics intact");
+			expect(g_sb_cell_w == 4 && g_sb_cell_h == 8, "N sb metrics");
+			expect(glyph_lookup(0x20) != NULL, "N main lookup survives sb init");
+			expect(glyph_sb_lookup(0x20) != NULL, "N sb space");
+			expect(glyph_sb_lookup(0x2588) != NULL, "N sb icon glyph");
+			expect(glyph_sb_lookup('A') == NULL, "N sb missing glyph NULL");
+			glyph_sb_die();
+			expect(g_sb_cell_w == 0 && g_sb_cell_h == 0, "N sb die resets");
+			expect(glyph_sb_init("/nonexistent/cruft-sb-selftest.font") == 0,
+				"N missing font -> off");
+			expect(g_sb_cell_w == 0, "N still off after miss");
+			expect(glyph_sb_init(nbad) == 0, "N 6x12 rejected for sb");
+			expect(g_sb_cell_w == 0, "N clean after bad metrics");
+			expect(glyph_sb_init(nfont) == 1, "N re-init after failure");
+			glyph_sb_die();
+			glyph_mmap_die();
+			unlink(nfont);
+			unlink(nbad);
+		}
+	}
+
+	/* O: status bar pure logic (parser, time, rssi levels, item builder) */
+	{
+		int unk = 0;
+		struct sb_state st;
+		struct sb_draw d;
+		char t[16], ex[16];
+		time_t tt;
+		struct tm tmx;
+
+		/* segment parser */
+		expect(sb_parse_segments(NULL, &unk) == 0, "O parse NULL");
+		expect(sb_parse_segments("", &unk) == 0, "O parse empty");
+		expect(sb_parse_segments("0", &unk) == 0, "O parse 0");
+		expect(sb_parse_segments("none", &unk) == 0, "O parse none");
+		{
+			uint8_t all = sb_parse_segments("all", &unk);
+
+			expect(all != 0, "O parse all");
+			expect((all & sb_parse_segments("time", &unk)) != 0,
+				"O all has time");
+			expect(sb_parse_segments("wifi,battery", &unk) ==
+				(sb_parse_segments("wifi", &unk) |
+				 sb_parse_segments("battery", &unk)),
+				"O parse combines");
+			expect(sb_parse_segments("TIME, BRIGHTNESS", &unk) ==
+				(sb_parse_segments("time", &unk) |
+				 sb_parse_segments("brightness", &unk)),
+				"O case/whitespace tolerance");
+			{
+				uint8_t gw = sb_parse_segments("wifi", &unk);
+				uint8_t wg = sb_parse_segments("wifi,garbage",
+					&unk);
+
+				expect(wg == gw && unk,
+					"O unknown flagged + ignored");
+			}
+		}
+
+		/* time format at a fixed instant (14:05 local) */
+		memset(&tmx, 0, sizeof tmx);
+		tmx.tm_year = 100; tmx.tm_mon = 0; tmx.tm_mday = 1;
+		tmx.tm_hour = 14; tmx.tm_min = 5; tmx.tm_sec = 0;
+		tt = mktime(&tmx);
+		sb_fmt_time(tt, 0, t);
+		{
+			struct tm lm;
+
+			localtime_r(&tt, &lm);
+			snprintf(ex, sizeof ex, "%02d:%02d", lm.tm_hour, lm.tm_min);
+			expect(strcmp(t, ex) == 0, "O 24h format");
+		}
+		sb_fmt_time(tt, 1, t);
+		{
+			struct tm lm;
+
+			localtime_r(&tt, &lm);
+			{
+				int hh = lm.tm_hour % 12;
+
+				if (!hh)
+					hh = 12;
+				snprintf(ex, sizeof ex, "%d:%02d%c%c", hh, lm.tm_min,
+					lm.tm_hour < 12 ? 'a': 'p', 'm');
+			}
+			expect(strcmp(t, ex) == 0, "O 12h format");
+		}
+		{
+			/* noon and midnight corners */
+			struct tm tmid = tmx, tnoon = tmx;
+
+			tmid.tm_hour = 0; tnoon.tm_hour = 12;
+			tmid.tm_min = tnoon.tm_min = 0;
+			sb_fmt_time(mktime(&tmid), 1, t);
+			expect(strcmp(t, "12:00am") == 0, "O midnight 12:00am");
+			sb_fmt_time(mktime(&tnoon), 1, t);
+			expect(strcmp(t, "12:00pm") == 0, "O noon 12:00pm");
+		}
+
+		/* rssi -> stair level */
+		expect(sb_rf_level(-50) == 4, "O rssi -50 -> 4");
+		expect(sb_rf_level(-55) == 4, "O rssi -55 -> 4");
+		expect(sb_rf_level(-60) == 3, "O rssi -60 -> 3");
+		expect(sb_rf_level(-70) == 2, "O rssi -70 -> 2");
+		expect(sb_rf_level(-85) == 1, "O rssi -85 -> 1");
+		expect(sb_rf_level(-999) == 0, "O rssi n/a -> 0");
+
+		/* battery color thresholds (palette: 9 red, 10 green, 11 yellow) */
+		expect(sb_batt_color(100) == 10, "O batt 100 green");
+		expect(sb_batt_color(50) == 10, "O batt 50 green");
+		expect(sb_batt_color(49) == 11, "O batt 49 yellow");
+		expect(sb_batt_color(20) == 11, "O batt 20 yellow");
+		expect(sb_batt_color(19) == 9, "O batt 19 red");
+		expect(sb_batt_color(0) == 9, "O batt 0 red");
+
+		/* builder: everything present */
+		memset(&st, 0, sizeof st);
+		st.now = tt; st.wifi = 3; st.battery = 85;
+		st.charging = 1; st.brightness = 50;
+		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
+		expect(d.center.n == 5, "O center 5 glyphs (HH:MM)");
+		expect(d.center.it[0].col == 7, "O clock light grey");
+		expect(d.left.n == 4, "O left 4 stair columns");
+		expect(d.left.it[0].cp == 0x2581 && d.left.it[3].cp == 0x2586,
+			"O stair glyphs low..high");
+		expect(d.left.it[0].col == 11 && d.left.it[1].col == 11 &&
+			d.left.it[2].col == 11 && d.left.it[3].col == 8,
+			"O wifi lvl3: 3 lit yellow, 4th dark");
+		expect(d.right.n == 19, "O right 19 items");
+		expect(d.right.it[0].cp == 0x2588 && d.right.it[1].cp == 0x2588,
+			"O meter lit cells");
+		expect(d.right.it[2].col == 8 && d.right.it[3].col == 8,
+			"O meter unlit cells dark");
+		expect(d.right.it[4].cp == '5' && d.right.it[6].cp == '%',
+			"O brightness 50%");
+		expect(d.right.it[9].cp == '[' && d.right.it[14].cp == ']',
+			"O battery brackets");
+		expect(d.right.it[10].cp == 0x2588 && d.right.it[11].cp == 0x2588 &&
+			d.right.it[12].cp == 0x2588 && d.right.it[13].cp == 0x258d,
+			"O battery 85% cells (full,full,full,3/8)");
+		expect(d.right.it[18].cp == 0x2191 && d.right.it[18].col == 11,
+			"O charging arrow yellow up");
+		st.charging = 0;
+		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
+		expect(d.right.it[18].cp == 0x2193 && d.right.it[18].col == 8,
+			"O discharge arrow grey down");
+		st.charging = 1; /* restore for the ascii checks below */
+
+		/* builder: 12h + ascii fallback + segment subsets */
+		sb_build_items(&st, sb_parse_segments("time", &unk), 1, 1, &d);
+		expect(d.center.n == 6 && d.center.it[4].cp == 'p' &&
+			d.center.it[5].cp == 'm',
+			"O 12h (14:05 -> 2:05pm)");
+		expect(d.left.n == 0 && d.right.n == 0,
+			"O time-only: other zones empty");
+		sb_build_items(&st, sb_parse_segments("wifi,battery", &unk), 0, 1, &d);
+		expect(d.left.n == 8, "O ascii wifi 'WIFI 3/4'");
+		expect(d.right.n == 8, "O ascii battery 'BAT 85%+'");
+		expect(d.right.it[7].cp == '+', "O ascii charge '+'");
+
+		/* absent sources hide their segments (clock remains) */
+		memset(&st, 0, sizeof st);
+		st.now = tt; st.wifi = -1; st.battery = -1; st.brightness = -1;
+		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
+		expect(d.center.n == 5 && d.left.n == 0 && d.right.n == 0,
+			"O absent sources hidden");
+	}
+
+	/* Q: status bar + grid shift on the PicoCalc 320x320 (bar on).
+	 * 6x12 main: oy=8, lines=(320-8)/12=26; grid rows 8..319, no bottom
+	 * strip (8 + 26*12 == 320). Strip: clock center (5 solid glyphs),
+	 * right zone = brightness meter + battery (19 solid glyphs), left
+	 * empty (no wifi fixtures). */
+	{
+		char tmqf[] = "/tmp/cruft-st-Q-XXXXXX";
+		char qsb[80], qm[80], qbase[96];
+		char qnet[120], qpsd[120], qbl[120], qpd[120];
+		int fqf = mkstemp(tmqf);
+
+		expect(fqf >= 0, "Q mkstemp");
+		if (fqf >= 0) {
+			struct framebuffer_t fbq;
+			uint8_t *qfp;
+			const char *roots_saved[3];
+
+			close(fqf);
+			snprintf(qsb, sizeof qsb, "%s.sb", tmqf);
+			snprintf(qm, sizeof qm, "%s.main6x12", tmqf);
+			snprintf(qbase, sizeof qbase, "%s.sys", tmqf);
+			expect(write_tiny_sb4x8(qsb) == 0, "Q write sb font");
+			expect(write_tiny_font6x12(qm) == 0, "Q write 6x12 font");
+
+			/* sysfs fixtures: no wifi (empty net dir), battery 85%
+			 * charging, backlight 128/255 (50%) */
+			{
+				const char *dirs[] = { "", "/net", "/ps",
+							"/ps/picocalc", "/bl", "/bl/bkl" };
+				const char *fixtures[][2] = {
+					{ "/ps/picocalc/capacity", "85\n" },
+					{ "/ps/picocalc/type", "Battery\n" },
+					{ "/ps/picocalc/status", "Charging\n" },
+					{ "/bl/bkl/brightness", "128\n" },
+					{ "/bl/bkl/max_brightness", "255\n" },
+				};
+
+				for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+					snprintf(qpd, sizeof qpd, "%s%s", qbase, dirs[i]);
+					mkdir(qpd, 0755);
+				}
+				for (size_t i = 0; i < sizeof fixtures / sizeof fixtures[0];
+				     i++) {
+					FILE *fx;
+
+					snprintf(qpd, sizeof qpd, "%s%s", qbase,
+						fixtures[i][0]);
+					fx = fopen(qpd, "w");
+					expect(fx != NULL, "Q fixture fopen");
+					if (fx) { /* expect() reports but does not stop */
+						fprintf(fx, "%s", fixtures[i][1]);
+						fclose(fx);
+					}
+				}
+			}
+
+			roots_saved[0] = sb_net_root;
+			roots_saved[1] = sb_ps_root;
+			roots_saved[2] = sb_bkl_root;
+			snprintf(qnet, sizeof qnet, "%s/net", qbase);
+			sb_net_root = qnet;
+			snprintf(qpsd, sizeof qpsd, "%s/ps", qbase);
+			sb_ps_root = qpsd;
+			snprintf(qbl, sizeof qbl, "%s/bl", qbase);
+			sb_bkl_root = qbl;
+			statusbar_reset_discovery();
+
+			setenv("CRUFT_SB_FONT", qsb, 1);
+			unsetenv("CRUFT_SB"); /* default: all segments */
+			statusbar_init();
+			expect(statusbar_h() == 8, "Q strip height 8");
+			expect(glyph_mmap_init(qm) == 1, "Q main font 6x12");
+
+			memset(&term, 0, sizeof(term));
+			expect(alloc_term_grid(&term, M_W, M_H) == 0, "Q alloc grid");
+			term.oy = statusbar_h();
+			term.lines = (M_H - term.oy) / CELL_HEIGHT; /* as term_init() */
+			expect(term.cols == 53 && term.lines == 26,
+				"Q grid 53x26 below the bar");
+
+			for (int y = 0; y < term.lines; y++) {
+				for (int x = 0; x < term.cols; x++) {
+					struct cell_t *c = &term.cells[y][x];
+
+					c->glyphp = glyph_get(0x20);
+					c->color_pair.fg = 7;
+					c->color_pair.bg = 1;
+					c->width = HALF;
+				}
+				term.line_dirty[y] = true;
+			}
+			term.mode = MODE_AMRIGHT;
+			term.palette_modified = false;
+			term.cursor.x = term.cursor.y = 0;
+
+			memset(&fbq, 0, sizeof(fbq));
+			qfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
+			expect(qfp != NULL, "Q fp alloc");
+			if (qfp) {
+				m_fill(qfp, 0xEFEFEFEFu, M_W * M_H);
+				fbq.fp = qfp;
+				fbq.buf = NULL;
+				fbq.wall = NULL;
+				fbq.info.width = M_W;
+				fbq.info.height = M_H;
+				fbq.info.line_length = M_W * 4;
+				fbq.info.bytes_per_pixel = 4;
+				fbq.info.bits_per_pixel = 32;
+				fbq.info.type = YAFT_FB_TYPE_PACKED_PIXELS;
+				fbq.info.visual = YAFT_FB_VISUAL_TRUECOLOR;
+				fbq.info.red.length = 8;   fbq.info.red.offset = 16;
+				fbq.info.green.length = 8; fbq.info.green.offset = 8;
+				fbq.info.blue.length = 8;  fbq.info.blue.offset = 0;
+				for (int i = 0; i < COLORS; i++)
+					fbq.real_palette[i] = (uint32_t) i * 0x01010101u;
+
+				/* Q1: full frame: strip rows (bar) + shifted grid.
+				 * All sb test glyphs are solid 4x8 blocks, so every ink
+				 * column is a uniform non-black color (per-item palette
+				 * index, verified separately in section O); we assert
+				 * geometry: which columns carry ink and which stay the
+				 * strip background. */
+				refresh(&fbq, &term);
+				{
+					int mism = 0, first_bad = -1;
+
+					for (int y = 0; y < M_H; y++) {
+						for (int x = 0; x < M_W; x++) {
+							uint32_t px = m_px_at(qfp, x, y);
+							int ink;
+
+							if (y < 8) {
+								/* clock 150..169; right zone 244..319
+								 * with the 2-space break 272..279 */
+								ink = (x >= 150 && x <= 169) ||
+									(x >= 244 && x <= 271) ||
+									(x >= 280 && x <= 319);
+								if (ink == (px != 0)) {
+									/* correct */
+								} else {
+									mism++;
+									if (first_bad < 0)
+										first_bad = y * M_W + x;
+								}
+							} else {
+								/* grid rows: 1px side margins, bg=1 */
+								uint32_t exp = (x == 0 || x == 319)
+									? 0: 0x01010101u;
+
+								if (px != exp) {
+									mism++;
+									if (first_bad < 0)
+										first_bad = y * M_W + x;
+								}
+							}
+						}
+					}
+					expect(mism == 0, "Q1 bar + shifted grid pixel-exact");
+					if (mism)
+						fprintf(stderr,
+							"  first mismatch at y=%d x=%d (count=%d)\n",
+							first_bad / M_W, first_bad % M_W, mism);
+				}
+
+				/* Q2: sixel blit shifted down by oy */
+				m_fill(qfp, 0xCDCDCDCDu, M_W * M_H);
+				{
+					uint8_t *pix = (uint8_t *) ecalloc(1,
+						(size_t) CELL_WIDTH * CELL_HEIGHT * BYTES_PER_PIXEL);
+					uint32_t want = color2pixel(&fbq.info, 0xA5A5A5A5u);
+
+					expect(pix != NULL, "Q2 pix alloc");
+					if (pix) {
+						m_fill(pix, want, CELL_WIDTH * CELL_HEIGHT);
+						draw_sixel(&fbq, &term, 3, 2, pix);
+						expect(m_px_at(qfp, 1 + 2 * 6, 8 + 3 * 12) == want,
+							"Q2 sixel at oy + grid origin");
+						expect(m_px_at(qfp, 1 + 2 * 6 + 5, 8 + 3 * 12 + 11) == want,
+							"Q2 sixel last px");
+						expect(m_px_at(qfp, 1 + 2 * 6, 3 * 12) == 0xCDCDCDCDu,
+							"Q2 unshifted spot untouched");
+					}
+					free(pix);
+				}
+
+				/* Q3: shadow (wall) mode: draw_line's per-line flush must land
+				 * on the oy-shifted band; the pre-fix form copied a band oy
+				 * pixels too high, leaving the bottom of each refreshed line
+				 * stale on the visible fb. */
+				uint8_t *qb = (uint8_t *) ecalloc(1,
+					(size_t) M_W * M_H * 4);
+				expect(qb != NULL, "Q3 shadow alloc");
+				if (qb) {
+					m_fill(qfp, 0xCDCDCDCDu, M_W * M_H);
+					m_fill(qb, 0xFFFFFFFFu, M_W * M_H);
+					fbq.buf = qb;
+					for (int y = 0; y < term.lines; y++)
+						term.line_dirty[y] = false;
+					term.line_dirty[3] = true;
+					refresh(&fbq, &term);
+					for (int dy = 0; dy < CELL_HEIGHT; dy++) {
+						expect(m_px_at(qfp, 10,
+							term.oy + 3 * CELL_HEIGHT + dy) == 0x01010101u,
+							"Q3 flush on shifted row");
+						/* rows the shifted band does not reach kept their
+						 * sentinel; the buggy flush had clobbered them */
+						if (dy < term.oy)
+							expect(m_px_at(qfp, 10, 3 * CELL_HEIGHT + dy)
+								== 0xCDCDCDCDu,
+								"Q3 unshifted row untouched");
+					}
+					fbq.buf = NULL;
+					free(qb);
+				}
+			}
+			free_term_cells(&term);
+			free(qfp);
+			unsetenv("CRUFT_SB_FONT");
+			statusbar_die();
+			glyph_mmap_die();
+			sb_net_root = roots_saved[0];
+			sb_ps_root = roots_saved[1];
+			sb_bkl_root = roots_saved[2];
+			{
+				const char *gone[] = {
+					"/ps/picocalc/capacity", "/ps/picocalc/type",
+					"/ps/picocalc/status", "/bl/bkl/brightness",
+					"/bl/bkl/max_brightness",
+				};
+				const char *rdirs[] = {
+					"/ps/picocalc", "/ps", "/bl/bkl", "/bl",
+					"/net", "",
+				};
+
+				for (size_t i = 0; i < sizeof gone / sizeof gone[0]; i++) {
+					snprintf(qpd, sizeof qpd, "%s%s", qbase, gone[i]);
+					unlink(qpd);
+				}
+				for (size_t i = 0; i < sizeof rdirs / sizeof rdirs[0]; i++) {
+					snprintf(qpd, sizeof qpd, "%s%s", qbase, rdirs[i]);
+					rmdir(qpd);
+				}
+			}
+			unlink(qsb);
+			unlink(qm);
 		}
 	}
 

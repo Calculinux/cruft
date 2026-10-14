@@ -730,9 +730,9 @@ int main(void)
 				(sb_parse_segments("wifi", &unk) |
 				 sb_parse_segments("battery", &unk)),
 				"O parse combines");
-			expect(sb_parse_segments("TIME, BRIGHTNESS", &unk) ==
+			expect(sb_parse_segments("TIME, BATTERY", &unk) ==
 				(sb_parse_segments("time", &unk) |
-				 sb_parse_segments("brightness", &unk)),
+				 sb_parse_segments("battery", &unk)),
 				"O case/whitespace tolerance");
 			{
 				uint8_t gw = sb_parse_segments("wifi", &unk);
@@ -792,6 +792,21 @@ int main(void)
 		expect(sb_rf_level(-85) == 1, "O rssi -85 -> 1");
 		expect(sb_rf_level(-999) == 0, "O rssi n/a -> 0");
 
+		/* /proc/net/wireless Level parsing */
+		expect(sb_wireless_level(
+			"wlan0: 0000   49.  -61.  -256        0  0  0  0 210 0",
+			"wlan0") == -61,
+			"O wireless level -61 dBm");
+		expect(sb_wireless_level("wlan1: 0000   49.  -61.  -256",
+			"wlan0") == -999,
+			"O wireless wrong iface");
+		expect(sb_wireless_level("wlan0: 0000   0.   0.   -256",
+			"wlan0") == -999,
+			"O wireless zero level invalid");
+		expect(sb_wireless_level("wlan0: 0000   48.  -62.",
+			"wlan0") == -62,
+			"O wireless truncated line ok");
+
 		/* battery color thresholds (palette: 9 red, 10 green, 11 yellow) */
 		expect(sb_batt_color(100) == 10, "O batt 100 green");
 		expect(sb_batt_color(50) == 10, "O batt 50 green");
@@ -803,33 +818,33 @@ int main(void)
 		/* builder: everything present */
 		memset(&st, 0, sizeof st);
 		st.now = tt; st.wifi = 3; st.battery = 85;
-		st.charging = 1; st.brightness = 50;
+		st.charging = 1;
 		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
 		expect(d.center.n == 5, "O center 5 glyphs (HH:MM)");
 		expect(d.center.it[0].col == 7, "O clock light grey");
-		expect(d.left.n == 4, "O left 4 stair columns");
-		expect(d.left.it[0].cp == 0x2581 && d.left.it[3].cp == 0x2586,
+		expect(d.left.n == 0, "O left zone unused");
+		expect(d.right.n == 16,
+			"O right 16 items (stair 4, break 2, battery 10)");
+		expect(d.right.it[0].cp == 0x2581 && d.right.it[3].cp == 0x2586,
 			"O stair glyphs low..high");
-		expect(d.left.it[0].col == 11 && d.left.it[1].col == 11 &&
-			d.left.it[2].col == 11 && d.left.it[3].col == 8,
+		expect(d.right.it[0].col == 11 && d.right.it[1].col == 11 &&
+			d.right.it[2].col == 11 && d.right.it[3].col == 8,
 			"O wifi lvl3: 3 lit yellow, 4th dark");
-		expect(d.right.n == 19, "O right 19 items");
-		expect(d.right.it[0].cp == 0x2588 && d.right.it[1].cp == 0x2588,
-			"O meter lit cells");
-		expect(d.right.it[2].col == 8 && d.right.it[3].col == 8,
-			"O meter unlit cells dark");
-		expect(d.right.it[4].cp == '5' && d.right.it[6].cp == '%',
-			"O brightness 50%");
-		expect(d.right.it[9].cp == '[' && d.right.it[14].cp == ']',
+		expect(d.right.it[4].cp == 0x20 && d.right.it[5].cp == 0x20,
+			"O 2-space break");
+		expect(d.right.it[6].cp == '[' && d.right.it[11].cp == ']',
 			"O battery brackets");
-		expect(d.right.it[10].cp == 0x2588 && d.right.it[11].cp == 0x2588 &&
-			d.right.it[12].cp == 0x2588 && d.right.it[13].cp == 0x258d,
+		expect(d.right.it[7].cp == 0x2588 && d.right.it[8].cp == 0x2588 &&
+			d.right.it[9].cp == 0x2588 && d.right.it[10].cp == 0x258d,
 			"O battery 85% cells (full,full,full,3/8)");
-		expect(d.right.it[18].cp == 0x2191 && d.right.it[18].col == 11,
+		expect(d.right.it[12].cp == '8' && d.right.it[13].cp == '5' &&
+			d.right.it[14].cp == '%',
+			"O battery 85%");
+		expect(d.right.it[15].cp == 0x2191 && d.right.it[15].col == 11,
 			"O charging arrow yellow up");
 		st.charging = 0;
 		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
-		expect(d.right.it[18].cp == 0x2193 && d.right.it[18].col == 8,
+		expect(d.right.it[15].cp == 0x2193 && d.right.it[15].col == 8,
 			"O discharge arrow grey down");
 		st.charging = 1; /* restore for the ascii checks below */
 
@@ -841,13 +856,17 @@ int main(void)
 		expect(d.left.n == 0 && d.right.n == 0,
 			"O time-only: other zones empty");
 		sb_build_items(&st, sb_parse_segments("wifi,battery", &unk), 0, 1, &d);
-		expect(d.left.n == 8, "O ascii wifi 'WIFI 3/4'");
-		expect(d.right.n == 8, "O ascii battery 'BAT 85%+'");
-		expect(d.right.it[7].cp == '+', "O ascii charge '+'");
+		expect(d.left.n == 0, "O ascii: left zone unused");
+		expect(d.right.n == 18,
+			"O ascii right 'WIFI 3/4  BAT 85%+'");
+		expect(d.right.it[7].cp == '4', "O ascii wifi '3/4'");
+		expect(d.right.it[8].cp == 0x20 && d.right.it[9].cp == 0x20,
+			"O ascii 2-space break");
+		expect(d.right.it[17].cp == '+', "O ascii charge '+'");
 
 		/* absent sources hide their segments (clock remains) */
 		memset(&st, 0, sizeof st);
-		st.now = tt; st.wifi = -1; st.battery = -1; st.brightness = -1;
+		st.now = tt; st.wifi = -1; st.battery = -1;
 		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
 		expect(d.center.n == 5 && d.left.n == 0 && d.right.n == 0,
 			"O absent sources hidden");
@@ -856,19 +875,19 @@ int main(void)
 	/* Q: status bar + grid shift on the PicoCalc 320x320 (bar on).
 	 * 6x12 main: oy=8, lines=(320-8)/12=26; grid rows 8..319, no bottom
 	 * strip (8 + 26*12 == 320). Strip: clock center (5 solid glyphs),
-	 * right zone = brightness meter + battery (19 solid glyphs), left
-	 * empty (no wifi fixtures). */
+	 * right zone = battery only (10 solid glyphs, no leading break),
+	 * left unused (no wifi fixtures). */
 	{
 		char tmqf[] = "/tmp/cruft-st-Q-XXXXXX";
 		char qsb[80], qm[80], qbase[96];
-		char qnet[120], qpsd[120], qbl[120], qpd[120];
+		char qnet[120], qpsd[120], qpd[120];
 		int fqf = mkstemp(tmqf);
 
 		expect(fqf >= 0, "Q mkstemp");
 		if (fqf >= 0) {
 			struct framebuffer_t fbq;
 			uint8_t *qfp;
-			const char *roots_saved[3];
+			const char *roots_saved[2];
 
 			close(fqf);
 			snprintf(qsb, sizeof qsb, "%s.sb", tmqf);
@@ -878,16 +897,14 @@ int main(void)
 			expect(write_tiny_font6x12(qm) == 0, "Q write 6x12 font");
 
 			/* sysfs fixtures: no wifi (empty net dir), battery 85%
-			 * charging, backlight 128/255 (50%) */
+			 * charging */
 			{
 				const char *dirs[] = { "", "/net", "/ps",
-							"/ps/picocalc", "/bl", "/bl/bkl" };
+							"/ps/picocalc" };
 				const char *fixtures[][2] = {
 					{ "/ps/picocalc/capacity", "85\n" },
 					{ "/ps/picocalc/type", "Battery\n" },
 					{ "/ps/picocalc/status", "Charging\n" },
-					{ "/bl/bkl/brightness", "128\n" },
-					{ "/bl/bkl/max_brightness", "255\n" },
 				};
 
 				for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
@@ -911,13 +928,10 @@ int main(void)
 
 			roots_saved[0] = sb_net_root;
 			roots_saved[1] = sb_ps_root;
-			roots_saved[2] = sb_bkl_root;
 			snprintf(qnet, sizeof qnet, "%s/net", qbase);
 			sb_net_root = qnet;
 			snprintf(qpsd, sizeof qpsd, "%s/ps", qbase);
 			sb_ps_root = qpsd;
-			snprintf(qbl, sizeof qbl, "%s/bl", qbase);
-			sb_bkl_root = qbl;
 			statusbar_reset_discovery();
 
 			setenv("CRUFT_SB_FONT", qsb, 1);
@@ -985,10 +999,9 @@ int main(void)
 							int ink;
 
 							if (y < 8) {
-								/* clock 150..169; right zone 244..319
-								 * with the 2-space break 272..279 */
+								/* clock 150..169; right zone (battery
+								 * only) 280..319 */
 								ink = (x >= 150 && x <= 169) ||
-									(x >= 244 && x <= 271) ||
 									(x >= 280 && x <= 319);
 								if (ink == (px != 0)) {
 									/* correct */
@@ -1075,16 +1088,13 @@ int main(void)
 			glyph_mmap_die();
 			sb_net_root = roots_saved[0];
 			sb_ps_root = roots_saved[1];
-			sb_bkl_root = roots_saved[2];
 			{
 				const char *gone[] = {
 					"/ps/picocalc/capacity", "/ps/picocalc/type",
-					"/ps/picocalc/status", "/bl/bkl/brightness",
-					"/bl/bkl/max_brightness",
+					"/ps/picocalc/status",
 				};
 				const char *rdirs[] = {
-					"/ps/picocalc", "/ps", "/bl/bkl", "/bl",
-					"/net", "",
+					"/ps/picocalc", "/ps", "/net", "",
 				};
 
 				for (size_t i = 0; i < sizeof gone / sizeof gone[0]; i++) {

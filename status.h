@@ -1,10 +1,10 @@
 /* See LICENSE for licence details. */
 /*
  * status.h: top status bar rendered into the margin strip above the
- * terminal grid. 4x8 font (normally miniwi): wifi stair on the left,
- * clock in the center, brightness meter + battery on the right.
+ * terminal grid. 4x8 font (normally miniwi): clock in the center,
+ * wifi stair + battery on the right.
  *
- * Data: sysfs (power_supply, backlight, net operstate) and nl80211
+ * Data: sysfs (power_supply, net operstate) and /proc/net/wireless
  * (signal strength), polled once per second from the refresh() path.
  * Segments whose source is absent simply vanish; the bar itself is
  * disabled (strip reverts to normal margin) when the font is missing
@@ -45,7 +45,6 @@ struct sb_state {
 	int wifi;       /* -1 none / 0 off / 1-4 signal level */
 	int battery;    /* 0-100 */
 	int charging;   /* 0/1 */
-	int brightness; /* 0-100 */
 };
 
 /* Poll one state snapshot (readers + discovery). Exposed for tests;
@@ -85,13 +84,16 @@ void sb_fmt_time(time_t now, int h12, char *out);
 /* RSSI dBm -> stair level 1-4 (0 = n/a). */
 int sb_rf_level(int rssi);
 
+/* /proc/net/wireless line -> Level in dBm (-999 when the line is not for
+ * the interface or the reading is absent/invalid). Pure; golden-tested. */
+int sb_wireless_level(const char *line, const char *ifname);
+
 /* Battery fill color index for a capacity. */
 uint8_t sb_batt_color(int pct);
 
 /* Test seams: sysfs roots (production values below). */
 extern const char *sb_net_root;
 extern const char *sb_ps_root;
-extern const char *sb_bkl_root;
 void statusbar_reset_discovery(void);
 
 #endif /* CRUFT_STATUS_H */

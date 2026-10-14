@@ -13,11 +13,10 @@ is a Linux framebuffer terminal emulator derived from yaft, tuned for
 low memory on Calculinux devices.
 .PP
 When a status font is installed, cruft draws a status bar in the margin
-strip above the cell grid: a wifi signal stair on the left, the clock
-in the centre, and a backlight meter and battery indicator on the
-right. A segment whose data source is absent (bare hardware, VM) is
-hidden; a missing or unsuitable status font disables the bar entirely
-and the grid reclaims the full screen.
+strip above the cell grid: the clock in the centre, and a wifi signal
+stair and battery indicator on the right. A segment whose data source is
+absent (bare hardware, VM) is hidden; a missing or unsuitable status
+font disables the bar entirely and the grid reclaims the full screen.
 .SH CUSTOMIZATION
 .PP
 Rewrite conf.h before make.
@@ -41,10 +40,9 @@ framebuffer shadow buffer. See cruft_wall.
 .B CRUFT_SB
 Status bar segments: a comma-separated list of
 .B time ,
-.B wifi ,
-.B battery
-and/or
-.BR brightness ,
+.B wifi
+and
+.BR battery ,
 or
 .B all
 (the default) to show every segment whose source is present,

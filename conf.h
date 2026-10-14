@@ -31,7 +31,7 @@ const char *shell_cmd = "/bin/bash";
 
 /* Status bar: compile-time default segments; CRUFT_SB env (via
  * /etc/default/console) overrides per session. Names: time, wifi,
- * battery, brightness (also "all" / "none" / "0"). */
+ * battery (also "all" / "none" / "0"). */
 const char *sb_default_segments = "all";
 #else
 extern const char *term_name;

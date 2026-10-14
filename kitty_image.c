@@ -455,8 +455,11 @@ static int png_decode(const uint8_t *raw, size_t n, struct terminal_t *term,
 
 	x0 = term->cursor.x * CELL_WIDTH;
 	y0 = term->cursor.y * CELL_HEIGHT;
-	aw = term->width - x0;
-	ah = term->height - y0;
+	/* Fit region measured in cell-grid pixel space: term->width/height
+	 * span the whole framebuffer (incl. the status strip), the cell grid
+	 * only extends cols*CELL_WIDTH x lines*CELL_HEIGHT. */
+	aw = term->cols * CELL_WIDTH - x0;
+	ah = term->lines * CELL_HEIGHT - y0;
 	if (aw < 1 || ah < 1) {
 		png_image_free(&pi);
 		return -1;
@@ -531,6 +534,10 @@ static void kitty_place(struct terminal_t *term, const uint32_t *img, int tw, in
 	y0 = term->cursor.y;
 	if (cols + x0 > term->cols)
 		cols = term->cols - x0;
+	/* belt and braces next to the callers' fit clipping: never paint a
+	 * cell outside the grid (term->cells[y] is sized for 'lines' rows) */
+	if (lines + y0 > term->lines)
+		lines = term->lines - y0;
 	if (cols < 1 || lines < 1)
 		goto done;
 
@@ -617,8 +624,9 @@ static void kitty_file_render(struct terminal_t *term, const struct kitty_args *
 	bg = term->virtual_palette[term->color_pair.bg];
 	x0 = term->cursor.x * CELL_WIDTH;
 	y0 = term->cursor.y * CELL_HEIGHT;
-	aw = term->width - x0;
-	ah = term->height - y0;
+	/* cell-grid pixel space, not the full framebuffer (see png_decode) */
+	aw = term->cols * CELL_WIDTH - x0;
+	ah = term->lines * CELL_HEIGHT - y0;
 	if (aw < 1 || ah < 1)
 		goto out; /* cursor outside the grid: nothing to anchor to */
 
@@ -631,6 +639,9 @@ static void kitty_file_render(struct terminal_t *term, const struct kitty_args *
 				"cruft: kitty_image: PNG payload dropped (built without libpng)\n");
 			goto out;
 		}
+		/* png_decode() is a constant -1 in no-libpng builds: same
+		 * knownConditionTrueFalse as the availability note above */
+		// cppcheck-suppress knownConditionTrueFalse
 		if (png_decode(raw, raw_len, term, ka->transparency, bg, &tw, &th, &img) < 0)
 			goto out;
 		goto place;
@@ -711,8 +722,9 @@ static void kitty_image_reply(struct terminal_t *term, const struct kitty_args *
 
 	/* One small write to the pty master; the standalone TU must not
 	 * pull the unity-built util.h (ewrite) into a second object. */
-	if (n >= 0)
-		(void) write(term->fd, buf, (size_t) n + 1);
+	if (n >= 0 && write(term->fd, buf, (size_t) n + 1) < 0)
+		fprintf(stderr, "cruft: kitty_image: Rep reply write failed: %s\n",
+			strerror(errno));
 }
 
 void kitty_image_dispatch(struct terminal_t *term, const char *payload)

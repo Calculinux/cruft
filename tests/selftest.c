@@ -1458,6 +1458,51 @@ int main(void)
 				u_teardown(&term);
 			}
 
+			/* U8: PNG via libpng (dropped gracefully when unbuilt) */
+			{
+				/* 2x2 RGB: red,green / blue,white */
+				static const uint8_t u_png[] = {
+					137, 80, 78, 71, 13, 10, 26, 10,
+					0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2,
+					8, 2, 0, 0, 0, 253, 212, 154, 115,
+					0, 0, 0, 20, 73, 68, 65, 84,
+					120, 156, 99, 248, 207, 192, 192, 0, 194, 12,
+					255, 255, 255, 255, 15, 0, 31, 238, 5, 251, 176, 184,
+					151, 201, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+				};
+				char b64[128], mid[160];
+				uint8_t *sq;
+
+				st_b64enc(u_png, sizeof u_png, b64);
+				snprintf(mid, sizeof mid, "f=t.png;%s", b64);
+				expect(u_setup(&term) == 0, "U8 alloc");
+				sq = u_osc1337("File", mid, 0);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				if (kitty_png_available()) {
+					const uint8_t *p = term.cells[0][0].pixmap;
+
+					expect(p != NULL, "U8 PNG landed");
+					if (p) {
+						/* cell pixels (x + y*CELL_WIDTH),
+						 * LE bytes of 0x00RRGGBB */
+						expect(p[0] == 0x00 && p[1] == 0x00
+							&& p[2] == 0xFF, "U8 TL red");
+						expect(p[4 + 1] == 0xFF, "U8 TR green");
+						expect(p[24 + 0] == 0xFF, "U8 BL blue");
+						expect(p[28 + 0] == 0xFF && p[28 + 1] == 0xFF
+							&& p[28 + 2] == 0xFF, "U8 BR white");
+						expect(p[8 + 0] == 0x00 && p[8 + 2] == 0x00,
+							"U8 px beyond 2x2 stays clear");
+					}
+					expect(term.cursor.x == 0 && term.cursor.y == 1,
+						"U8 cursor below image");
+				} else {
+					expect(!term.cells[0][0].has_pixmap,
+						"U8 no libpng: PNG dropped");
+				}
+				u_teardown(&term);
+			}
 
 			glyph_mmap_die();
 		}

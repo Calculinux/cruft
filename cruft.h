@@ -198,6 +198,7 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc);
 /* kitty_image.c */
 int kitty_base64_decode(const char *in, size_t len, uint8_t *out, size_t cap, size_t *out_len);
 int kitty_args_parse(const char *payload, struct kitty_args *ka);
+bool kitty_png_available(void);
 void kitty_image_dispatch(struct terminal_t *term, const char *payload);
 
 /* terminal cells (terminal_cell.c) */

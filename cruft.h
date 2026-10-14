@@ -51,6 +51,9 @@ enum misc {
 	DEFAULT_CHAR       = SPACE,            /* used for erase char */
 	BRIGHT_INC         = 8,                /* value used for brightening color */
 	SB_TITLE_MAX       = 48,               /* status bar window title length (excl. NUL) */
+	SB_DEFAULT_LINES   = 96,               /* scrollback depth (CRUFT_HISTORY) */
+	SB_MAX_LINES       = 1024,             /* CRUFT_HISTORY upper clamp */
+	SB_PIXMAP_CAP_KIB  = 64,               /* sixel payload the ring retains */
 };
 
 enum char_attr {
@@ -150,6 +153,22 @@ struct screen_t {
 	bool allocated;               /* cell matrix backing store exists */
 };
 
+/* Scrollback: ring of COPIED rows drained from the primary while a
+ * full-screen scroll-up erases them (sub-regions and the alt screen
+ * never feed it). The ring owns its cell arrays: pixmap blocks are
+ * duplicated on intake and cleared on eviction, so live-screen
+ * destruction can never alias stored history. head = next write slot
+ * (= oldest slot when full). view = stored rows the renderer lifts
+ * above the live screen (0 = live tail). */
+struct scrollback_t {
+	unsigned cap;              /* 0 = disabled (CRUFT_HISTORY=0 / alloc failed) */
+	unsigned count;            /* stored rows */
+	unsigned head;             /* next write slot */
+	size_t pixmap_bytes;       /* sum of sixel payloads held by the ring */
+	struct cell_t **rows;      /* ring slots, one heap row array each */
+	unsigned view;             /* rows shown above the live screen */
+};
+
 struct terminal_t {
 	int fd;                                  /* master of pseudo terminal */
 	int width, height;                       /* terminal size (pixel) */
@@ -157,6 +176,7 @@ struct terminal_t {
 	int cols, lines;                         /* terminal size (cell) */
 	struct screen_t scr[2];                  /* scr[0]: primary, scr[1]: alternate (reserved) */
 	unsigned active;                         /* index of the active screen in scr[] */
+	struct scrollback_t sb;                  /* history ring (primary screen only) */
 	enum term_mode mode;                     /* for set/reset mode */
 	struct state_t state;                    /* for restore */
 	struct alt_saved_t alt_saved;            /* cursor/margins parked in DECALT */
@@ -209,6 +229,15 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc);
 /* terminal cells (terminal_cell.c) */
 void erase_cell(struct terminal_t *term, int y, int x);
 void copy_cell(struct terminal_t *term, int dst_y, int dst_x, int src_y, int src_x);
+
+/* scrollback (scrollback.c) */
+void sb_init(struct terminal_t *term);
+void sb_die(struct terminal_t *term);
+void sb_reset(struct terminal_t *term);
+void sb_feed_line(struct terminal_t *term, const struct cell_t *row);
+const struct cell_t *sb_view_row(const struct terminal_t *term, int line);
+int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n);
+void sb_scrub_freed_glyphs(const struct terminal_t *term, const struct glyph_t *freed, int n);
 
 #ifndef CRUFT_NO_GLOBALS
 const uint8_t attr_mask[] = {

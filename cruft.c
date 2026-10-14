@@ -240,8 +240,18 @@ int main(int argc, char *const argv[])
 			continue;
 
 		if (FD_ISSET(STDIN_FILENO, &fds)) {
-			if ((size = read(STDIN_FILENO, buf, BUFSIZE)) > 0)
-				ewrite(term.fd, buf, size);
+			if ((size = read(STDIN_FILENO, buf, BUFSIZE)) > 0) {
+				/* Meta-nav keys at the front of the buffer steer
+				 * the scrollback view and are swallowed; the rest
+				 * (bare arrows among them) reaches the shell. Any
+				 * foreign byte snaps the view back to the live tail. */
+				unsigned view0 = term.sb.view;
+				int eaten = sb_consume_nav(&term, buf, (int)size);
+
+				ewrite(term.fd, buf + eaten, (size_t)(size - eaten));
+				if (eaten > 0 || term.sb.view != view0)
+					refresh(&fb, &term);
+			}
 		}
 		if (FD_ISSET(term.fd, &fds)) {
 			if ((size = read(term.fd, buf, BUFSIZE)) > 0) {

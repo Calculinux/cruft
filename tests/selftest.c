@@ -1352,6 +1352,222 @@ int main(void)
 			"S term_die freed both screens");
 	}
 
+	/* T: scrollback ring (scrollback.c): feeding rules (full-primary
+	 * scrolls only), copied-row ownership, eviction order, viewport
+	 * mapping, Meta-nav keys, RIS reset, pixmap payload cap. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *tscr;
+		const struct glyph_t *qm = glyph_get(0x3f);
+		const uint8_t bare_up[]   = {ESC, '[', 'A'};
+		const uint8_t meta_up[]   = {ESC, ESC, '[', 'A'};
+		const uint8_t ss3_down[]  = {ESC, ESC, 'O', 'B'};
+		const uint8_t meta_pgup[] = {ESC, ESC, '[', '5', '~'};
+		const uint8_t meta_home[] = {ESC, ESC, '[', '7', '~'};
+		const uint8_t meta_end[]  = {ESC, ESC, '[', '8', '~'};
+		const uint8_t mixed[]     = {ESC, ESC, '[', 'A', 'x'};
+
+		setenv("CRUFT_HISTORY", "4", 1);
+		expect(term_init(&term, 96, 48), "T term_init 16x4");
+		tscr = active_screen(&term);
+		expect(term.sb.cap == 4 && term.sb.count == 0 && term.sb.view == 0,
+			"T ring initialised (cap 4)");
+
+		/* one marker per row: the fg colour tags the drain order */
+		for (int y = 0; y < term.lines; y++) {
+			term.color_pair.fg = (uint8_t) (10 + y);
+			set_cell(&term, y, 0, qm);
+		}
+		term.color_pair.fg = DEFAULT_FG;
+
+		/* draining one row: a full-primary scroll feeds the ring */
+		set_cursor(&term, term.lines - 1, 0);
+		move_cursor(&term, 1, 0);
+		expect(term.sb.count == 1, "T full scroll drains a row");
+		expect(tscr->cells[0][0].color_pair.fg == 11, "T live screen scrolled");
+		term.sb.view = 1;
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == 10,
+			"T drained row is the old top");
+		expect(sb_view_row(&term, 1) == tscr->cells[0],
+			"T view 1: logical row 1 is live row 0");
+
+		/* five more: eviction keeps the youngest four */
+		for (int i = 0; i < 5; i++) {
+			int y = term.lines - 1;
+
+			term.color_pair.fg = (uint8_t) (20 + i);
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 4, "T ring capped at 4");
+		term.sb.view = term.sb.count; /* deepest: top line = oldest */
+		/* drain order was 10, 11, 12, 13, 20, 21 (each scroll drops the
+		 * row sliding off the top, not the row written at the bottom) */
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == 12, "T oldest survivor");
+		expect(sb_view_row(&term, 1)[0].color_pair.fg == 13, "T middle survivor");
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 21, "T newest survivor");
+		term.sb.view = 0;
+		expect(sb_view_row(&term, 0) == tscr->cells[0], "T view 0 maps to live");
+
+		/* sub-region and alt-screen scrolls never feed history */
+		tscr->scroll.top = 1;
+		set_cursor(&term, 1, 0);
+		move_cursor(&term, -1, 0);
+		expect(term.sb.count == 4, "T sub-region scroll does not drain");
+		tscr->scroll.top = 0;
+		term.sb.view = 2;
+		enter_alt_screen(&term);
+		expect(term.sb.view == 0, "T alt entry ends browsing");
+		set_cursor(&term, term.lines - 1, 0);
+		move_cursor(&term, 1, 0);
+		expect(term.sb.count == 4, "T alt scroll does not drain");
+		leave_alt_screen(&term);
+
+		/* navigation keys: Meta-prefixed only, leading-run consumption */
+		expect(sb_consume_nav(&term, bare_up, 3) == 0, "T bare arrow passes through");
+		expect(sb_consume_nav(&term, meta_up, 4) == 4 && term.sb.view == 1,
+			"T meta-up browses deeper");
+		expect(sb_consume_nav(&term, ss3_down, 4) == 4 && term.sb.view == 0,
+			"T SS3 down back to live");
+		expect(sb_consume_nav(&term, meta_pgup, 5) == 5 && term.sb.view == 2,
+			"T pgup steps a half page");
+		expect(sb_consume_nav(&term, meta_home, 5) == 5 && term.sb.view == 4,
+			"T home jumps to oldest");
+		expect(sb_consume_nav(&term, meta_end, 5) == 5 && term.sb.view == 0,
+			"T end jumps to live tail");
+		term.sb.view = 3;
+		expect(sb_consume_nav(&term, mixed, 5) == 4 && term.sb.view == 0,
+			"T nav run then foreign byte snaps to live");
+		{
+			const uint8_t plain = 'x';
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, &plain, 1) == 0 && term.sb.view == 0,
+				"T plain key while browsing snaps to live");
+		}
+
+		/* RIS resets the ring; an empty ring lets nav pass through */
+		reset(&term);
+		expect(term.sb.count == 0 && term.sb.view == 0, "T RIS empties ring");
+		expect(sb_consume_nav(&term, meta_up, 4) == 0,
+			"T no history: nav passes through");
+
+		/* CRUFT_HISTORY=0 disables the ring entirely */
+		setenv("CRUFT_HISTORY", "0", 1);
+		expect(term_init(&term, 96, 48), "T re-init disabled");
+		expect(term.sb.cap == 0 && term.sb.rows == NULL, "T CRUFT_HISTORY=0 off");
+		set_cursor(&term, term.lines - 1, 0);
+		move_cursor(&term, 1, 0);
+		expect(term.sb.count == 0, "T disabled ring not fed");
+		term_die(&term);
+
+		/* sixel payload cap: newest art survives, oldest degrades */
+		setenv("CRUFT_HISTORY", "512", 1);
+		expect(term_init(&term, 96, 48), "T cap-512 term_init");
+		for (int i = 0; i < 400; i++) {
+			int y = term.lines - 1;
+			uint8_t *pm = cell_pixmap_ensure(&active_screen(&term)->cells[y][0]);
+
+			/* the cell is re-erased after every scroll, so the pointer
+			 * must not be held across iterations */
+			if (pm) {
+				pm[0] = (uint8_t) i;
+				pm[1] = (uint8_t) (i >> 8);
+			}
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 400, "T 400 rows stored");
+		expect(term.sb.pixmap_bytes > 0
+			&& term.sb.pixmap_bytes <= (size_t) SB_PIXMAP_CAP_KIB * 1024,
+			"T pixmap payload capped");
+		term.sb.view = term.sb.count;
+		expect(sb_view_row(&term, 0)[0].has_pixmap == false, "T oldest art degraded");
+		term.sb.view = 4;
+		/* the newest stored row carries the marker written 3 scrolls
+		 * earlier (the live bottom is not in the ring yet) */
+		expect(sb_view_row(&term, 3)[0].has_pixmap
+			&& sb_view_row(&term, 3)[0].pixmap[0] == (uint8_t) 396
+			&& sb_view_row(&term, 3)[0].pixmap[1] == 1,
+			"T newest art kept deep-copied");
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+
+		/* Bar geometry on 320x320: the first stored row anchors the
+		 * grid left (x0 is grid, not margin) and the 2px slider rides
+		 * the right edge; track palette 8, thumb palette 7. With
+		 * count 2 / view 1: thumb height 312*26/28 = 289, offset
+		 * (312-289)/2 = 11, so thumb spans y 11..299. */
+		memset(&term, 0, sizeof(term));
+		expect(alloc_term_grid(&term, M_W, M_H) == 0, "T bar fixture 53x26");
+		{
+			struct framebuffer_t fbm;
+			uint8_t *mfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
+
+			expect(mfp != NULL, "T bar fp alloc");
+			for (int y = 0; y < term.lines; y++)
+				for (int x = 0; x < term.cols; x++) {
+					struct cell_t *c = &term.scr[0].cells[y][x];
+
+					c->glyphp = glyph_get(0x20);
+					c->color_pair.fg = 7;
+					c->color_pair.bg = 1;
+					c->width = HALF;
+				}
+			for (int y = 0; y < term.lines; y++)
+				term.scr[0].line_dirty[y] = true;
+			term.mode = MODE_AMRIGHT;
+
+			/* synthetic non-empty ring (fixture predates sb_init) */
+			term.sb.cap = 4;
+			term.sb.count = 2;
+			term.sb.head = 2;
+			term.sb.view = 1;
+			term.sb.rows = (struct cell_t **) ecalloc(4, sizeof(*term.sb.rows));
+			term.sb.rows[0] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
+			term.sb.rows[1] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
+			expect(term.sb.rows && term.sb.rows[0] && term.sb.rows[1], "T ring synth");
+			/* stored rows are populated copies in production */
+			for (int r = 0; r < 2; r++)
+				for (int x = 0; x < term.cols; x++) {
+					struct cell_t *c = &term.sb.rows[r][x];
+
+					c->glyphp = glyph_get(0x20);
+					c->color_pair.fg = 7;
+					c->color_pair.bg = 1;
+					c->width = HALF;
+				}
+
+			m_fill(mfp, 0xEFEFEFEFu, M_W * M_H);
+			memset(&fbm, 0, sizeof(fbm));
+			fbm.fp = mfp;
+			fbm.info.width = M_W;
+			fbm.info.height = M_H;
+			fbm.info.line_length = M_W * 4;
+			fbm.info.bytes_per_pixel = 4;
+			fbm.info.bits_per_pixel = 32;
+			fbm.info.type = YAFT_FB_TYPE_PACKED_PIXELS;
+			fbm.info.visual = YAFT_FB_VISUAL_TRUECOLOR;
+			fbm.info.red.length = 8;   fbm.info.red.offset = 16;
+			fbm.info.green.length = 8; fbm.info.green.offset = 8;
+			fbm.info.blue.length = 8;  fbm.info.blue.offset = 0;
+			for (int i = 0; i < COLORS; i++)
+				fbm.real_palette[i] = (uint32_t) i * 0x01010101u;
+
+			refresh(&fbm, &term);
+			expect(m_px_at(mfp, 0, 0) == 0x01010101u, "T grid anchored left");
+			expect(m_px_at(mfp, 317, 0) == 0x01010101u, "T grid reaches x317");
+			expect(m_px_at(mfp, 318, 5) == 0x08080808u, "T bar track (above thumb)");
+			expect(m_px_at(mfp, 319, 100) == 0x07070707u, "T bar thumb");
+			expect(m_px_at(mfp, 318, 305) == 0x08080808u, "T bar track (below thumb)");
+			expect(m_px_at(mfp, 318, 315) == 0x00000000u, "T below grid is margin, not bar");
+		}
+		term_die(&term);
+	}
+
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);
 		return 1;

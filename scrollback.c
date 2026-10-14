@@ -1,0 +1,290 @@
+/* Scrollback ring + history browsing (Calculinux/cruft).
+ * Rows are COPIED into the ring at drain time (see sb_feed_line); the
+ * ring then owns them independently of the live screen. */
+#define CRUFT_NO_GLOBALS
+#include "cruft.h"
+#include "conf.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+/* Drop one stored row (sixel payloads first, then the row array). */
+static void sb_row_free(const struct terminal_t *term, struct cell_t *row)
+{
+	if (!row)
+		return;
+	for (int x = 0; x < term->cols; x++)
+		cell_pixmap_clear(&row[x]);
+	free(row);
+}
+
+/* Slot of the kth-newest stored row (k: 0 = newest, count-1 = oldest). */
+static struct cell_t *sb_row_at(const struct terminal_t *term, unsigned k)
+{
+	const struct scrollback_t *sb = &term->sb;
+
+	return sb->rows[(sb->head + sb->cap - 1 - k) % sb->cap];
+}
+
+/* Enforce the total sixel payload cap, stripping the oldest art first.
+ * Stripped cells keep their glyph (a space after erase), so history
+ * degrades to blank where it once drew pictures. Cold path: runs only
+ * after a row carrying pixmap cells lands in a hot ring. */
+static void sb_shrink_pixmaps(struct terminal_t *term)
+{
+	struct scrollback_t *sb = &term->sb;
+	const size_t cap_b = (size_t)SB_PIXMAP_CAP_KIB * 1024;
+	const size_t cell_b = cell_pixmap_bytes();
+
+	if (sb->pixmap_bytes <= cap_b)
+		return;
+	for (unsigned k = sb->count; k-- > 0 && sb->pixmap_bytes > cap_b;) {
+		struct cell_t *row = sb_row_at(term, k);
+
+		for (int x = 0; x < term->cols && sb->pixmap_bytes > cap_b; x++)
+			if (row[x].has_pixmap) {
+				cell_pixmap_clear(&row[x]);
+				sb->pixmap_bytes -= cell_b;
+			}
+	}
+}
+
+/* CRUFT_HISTORY: ring depth in rows (default SB_DEFAULT_LINES, 0 = off,
+ * clamped to SB_MAX_LINES). Unusable value degrades to the default. */
+void sb_init(struct terminal_t *term)
+{
+	const char *env;
+	long n = SB_DEFAULT_LINES;
+
+	term->sb = (struct scrollback_t) {0};
+
+	env = getenv("CRUFT_HISTORY");
+	if (env && *env) {
+		char *ep;
+
+		n = strtol(env, &ep, 10);
+		if (ep == env || n < 0)
+			n = SB_DEFAULT_LINES;
+	}
+	if (n > SB_MAX_LINES)
+		n = SB_MAX_LINES;
+
+	term->sb.cap = (unsigned)n;
+	if (term->sb.cap == 0)
+		return;
+
+	/* Bound-checked above to [0, SB_MAX_LINES]; the opt-in taint
+	 * analyzer cannot see through strtol and would flag the size. */
+	term->sb.rows = (struct cell_t **) calloc(term->sb.cap, sizeof(*term->sb.rows)); /* NOLINT(clang-analyzer-optin.taint.TaintedAlloc) */
+	if (!term->sb.rows) {
+		fprintf(stderr, "cruft: scrollback: ring alloc failed, disabled\n");
+		term->sb.cap = 0;
+	}
+}
+
+void sb_reset(struct terminal_t *term)
+{
+	struct scrollback_t *sb = &term->sb;
+
+	if (sb->rows)
+		for (unsigned i = 0; i < sb->cap; i++) {
+			sb_row_free(term, sb->rows[i]);
+			sb->rows[i] = NULL;
+		}
+	sb->count = sb->head = 0;
+	sb->pixmap_bytes = 0;
+	sb->view = 0;
+}
+
+void sb_die(struct terminal_t *term)
+{
+	sb_reset(term);
+	free(term->sb.rows);
+	term->sb.rows = NULL;
+	term->sb.cap = 0;
+}
+
+/* Copy a live row into the ring (evicting the oldest when full) and
+ * take ownership of any sixel payloads it carried. */
+void sb_feed_line(struct terminal_t *term, const struct cell_t *src)
+{
+	struct scrollback_t *sb = &term->sb;
+	const size_t cell_b = cell_pixmap_bytes();
+	struct cell_t *row;
+	unsigned slot;
+
+	if (sb->cap == 0 || !sb->rows || term->cols < 1)
+		return;
+
+	slot = sb->head;
+	if (sb->count == sb->cap) {
+		struct cell_t *old = sb->rows[slot];
+
+		for (int x = 0; x < term->cols; x++)
+			if (old[x].has_pixmap)
+				sb->pixmap_bytes -= cell_b;
+		sb_row_free(term, old);
+		sb->count--;
+	}
+
+	row = (struct cell_t *) calloc((size_t)term->cols, sizeof(*row));
+	if (!row) {
+		fprintf(stderr, "cruft: scrollback: row alloc failed, line dropped\n");
+		return;
+	}
+	memcpy(row, src, (size_t)term->cols * sizeof(*row));
+
+	for (int x = 0; x < term->cols; x++) {
+		if (!row[x].has_pixmap || !row[x].pixmap)
+			continue;
+		/* The row copy still ALIASES the live screen's pixmap block;
+		 * splice in a deep copy and never free the aliased one. */
+		struct cell_t tmp = {0};
+
+		if (cell_pixmap_dup(&tmp, &row[x]) == 0) {
+			row[x].pixmap = tmp.pixmap;
+			sb->pixmap_bytes += cell_b;
+		} else
+			row[x].has_pixmap = false, row[x].pixmap = NULL; /* no alias kept */
+	}
+
+	sb->rows[slot] = row;
+	sb->head = (slot + 1) % sb->cap;
+	sb->count++;
+	if (sb->view > sb->count)
+		sb->view = sb->count;
+	sb_shrink_pixmaps(term);
+}
+
+/* Resolve logical line (0 = top of the rendered window) to a row: the
+ * bottom lines - view lines are the live primary, the rest is history. */
+const struct cell_t *sb_view_row(const struct terminal_t *term, int line)
+{
+	const struct scrollback_t *sb = &term->sb;
+	unsigned d = sb->view + (term->lines - 1 - line);
+
+	/* Live rows come from whichever screen is active (view is forced to
+	 * 0 on the alt screen, so the history arm is unreachable there). */
+	if ((int)d < term->lines)
+		return term->scr[term->active].cells[term->lines - 1 - d];
+	return sb->rows[(sb->head + sb->cap - 1 - (d - term->lines)) % sb->cap];
+}
+
+/*
+ * Navigation keys. Recognized only as a leading run of complete
+ * sequences; anything not matching is forwarded to the shell verbatim.
+ * Every binding is Meta-prefixed (ESC ESC ...) so bare arrows never
+ * match and readline's history keys stay intact. Forms accepted after
+ * the Meta: CSI (ESC [) and SS3 (ESC O), as emitted by either console
+ * keymap. HOME/END jump to the oldest row / the live tail.
+ */
+enum sb_action {
+	SB_UP, SB_DOWN, SB_PAGE_UP, SB_PAGE_DOWN, SB_TOP, SB_BOTTOM,
+};
+
+static const uint8_t nav_seqs[][6] = {
+	{ESC, ESC, '[', 'A'}, {ESC, ESC, 'O', 'A'},
+	{ESC, ESC, '[', 'B'}, {ESC, ESC, 'O', 'B'},
+	{ESC, ESC, '[', '5', '~'}, {ESC, ESC, 'O', '5', '~'},
+	{ESC, ESC, '[', '6', '~'}, {ESC, ESC, 'O', '6', '~'},
+	{ESC, ESC, '[', '7', '~'}, {ESC, ESC, 'O', '7', '~'},
+	{ESC, ESC, '[', '8', '~'}, {ESC, ESC, 'O', '8', '~'},
+};
+static const int nav_seq_lens[] = {4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5};
+static const enum sb_action nav_actions[] = {
+	SB_UP, SB_UP, SB_DOWN, SB_DOWN,
+	SB_PAGE_UP, SB_PAGE_UP, SB_PAGE_DOWN, SB_PAGE_DOWN,
+	SB_TOP, SB_TOP, SB_BOTTOM, SB_BOTTOM,
+};
+
+static void sb_apply(struct terminal_t *term, enum sb_action action)
+{
+	struct scrollback_t *sb = &term->sb;
+	unsigned half = term->lines / 2;
+
+	if (half < 1)
+		half = 1;
+	switch (action) {
+	case SB_UP:
+		if (sb->view < sb->count)
+			sb->view++;
+		break;
+	case SB_DOWN:
+		if (sb->view)
+			sb->view--;
+		break;
+	case SB_PAGE_UP:
+		sb->view = (sb->view + half < sb->count) ? sb->view + half: sb->count;
+		break;
+	case SB_PAGE_DOWN:
+		sb->view = (sb->view > half) ? sb->view - half: 0;
+		break;
+	case SB_TOP:
+		sb->view = sb->count;
+		break;
+	case SB_BOTTOM:
+		sb->view = 0;
+		break;
+	}
+}
+
+/* Bytes of the leading navigation run (0 = nothing to intercept: the
+ * whole buffer is the shell's). */
+int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n)
+{
+	unsigned consumed = 0;
+
+	if (!vt_active || term->active != 0)
+		return 0; /* alt screen: the app owns every key */
+	if (term->sb.cap == 0 || term->sb.count == 0)
+		return 0; /* nothing stored: Meta-nav passes through */
+
+	while (consumed < (unsigned)n) {
+		int matched = -1;
+
+		for (unsigned i = 0; i < sizeof(nav_seqs) / sizeof(nav_seqs[0]); i++) {
+			int len = nav_seq_lens[i];
+
+			if (consumed + (unsigned)len <= (unsigned)n
+			    && memcmp(buf + consumed, nav_seqs[i], (size_t)len) == 0) {
+				matched = (int)i;
+				break;
+			}
+		}
+		if (matched < 0)
+			break;
+		sb_apply(term, nav_actions[matched]);
+		consumed += (unsigned)nav_seq_lens[matched];
+	}
+	/* Whatever follows a nav run is meant for the live screen: classic
+	 * terminals snap back to the bottom on the first foreign key, and a
+	 * mouseless console needs that (typing blind over stale history is
+	 * the trap). Lone ESC included. */
+	if (consumed < (unsigned)n && term->sb.view != 0)
+		term->sb.view = 0;
+	return (int)consumed;
+}
+
+/* DRCS redefinition frees a charset table (drcs.c); history rows still
+ * pointing into it would dangle. Scrub those cells to the substitute
+ * glyph. The test is an ADDRESS RANGE comparison only: freed glyphs are
+ * never dereferenced, the surviving width tag picks the stand-in. */
+void sb_scrub_freed_glyphs(const struct terminal_t *term, const struct glyph_t *freed, int n)
+{
+	const struct glyph_t *lo = freed;
+	const struct glyph_t *hi;
+
+	if (!freed || n <= 0)
+		return;
+	hi = freed + n;
+	for (unsigned k = 0; k < term->sb.count; k++) {
+		struct cell_t *row = sb_row_at(term, k);
+
+		for (int x = 0; x < term->cols; x++) {
+			if (row[x].glyphp < lo || row[x].glyphp >= hi)
+				continue;
+			row[x].glyphp = (row[x].width == WIDE || row[x].width == NEXT_TO_WIDE)
+				? glyph_get(SUBSTITUTE_WIDE): glyph_get(SUBSTITUTE_HALF);
+		}
+	}
+}

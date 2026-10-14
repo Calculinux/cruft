@@ -319,15 +319,23 @@ void fb_die(struct framebuffer_t *fb)
 
 /*
  * Grid is centered horizontally so the leftover (width - cols*CELL_WIDTH)
- * pixels are split between the left and right edges. Vertically the grid
- * sits below the status bar strip: rows are anchored at term->oy (0 when
- * the bar is off, one status-font line when it is on). The same origins
- * must be applied to text (draw_line) and sixel blits (draw_sixel) or
- * sixel content lands offset from the adjacent glyphs.
+ * pixels are split between the left and right edges. Once scrollback
+ * stores rows, the grid anchors to the left edge instead and the whole
+ * leftover becomes the right scrollbar strip (one-time 1px shift on the
+ * PicoCalc 6x12 default; fonts dividing the width exactly are
+ * unaffected). Vertically the grid sits below the status bar strip: rows
+ * are anchored at term->oy (0 when the bar is off, one status-font line
+ * when it is on). The same origins must be applied to text (draw_line)
+ * and sixel blits (draw_sixel) or sixel content lands offset from the
+ * adjacent glyphs.
  */
 static inline int grid_origin_x(const struct terminal_t *term)
 {
-	return (term->width - term->cols * CELL_WIDTH) / 2;
+	int rem = term->width - term->cols * CELL_WIDTH;
+
+	if (term->sb.count > 0 && rem >= 2)
+		return 0;
+	return rem / 2;
 }
 
 /*
@@ -438,20 +446,23 @@ static inline void draw_sixel(struct framebuffer_t *fb, struct terminal_t *term,
 	}
 }
 
-static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, int line)
+static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, int line, const struct cell_t *row)
 {
-	int pos, size, bit_base, ox;
+	int pos, size, bit_base, ox, cur_line;
 	int col, w, h;
 	uint32_t pixel;
 	struct color_pair_t color_pair;
-	struct cell_t *cellp;
+	const struct cell_t *cellp;
 	struct screen_t *scr = active_screen(term);
 	uint8_t *dest = fb_draw_dest(fb);
 
 	ox = grid_origin_x(term);
+	/* The cursor box lives on the live screen, which the viewport lifts
+	 * down by sb.view logical lines (== 0: the historical form). */
+	cur_line = (int)(scr->cursor.y + term->sb.view);
 	for (col = term->cols - 1; col >= 0; col--) {
-		/* target cell */
-		cellp = &scr->cells[line][col];
+		/* target cell (row resolves live/history for this line) */
+		cellp = &row[col];
 
 		/* draw sixel pixmap */
 		if (cellp->has_pixmap && cellp->pixmap) {
@@ -471,7 +482,7 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 		bit_base = (cellp->width == WIDE) ? CELL_WIDTH : 0;
 
 		/* check cursor position */
-		if ((term->mode & MODE_CURSOR && line == scr->cursor.y)
+		if ((term->mode & MODE_CURSOR && line == cur_line)
 			&& (col == scr->cursor.x
 			|| (cellp->width == WIDE && (col + 1) == scr->cursor.x)
 			|| (cellp->width == NEXT_TO_WIDE && (col - 1) == scr->cursor.x))) {
@@ -524,7 +535,54 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 		(maybe we can use this by using libdrm) */
 	/* TODO: vertical synchronizing */
 
-	scr->line_dirty[line] = ((term->mode & MODE_CURSOR) && scr->cursor.y == line) ? true: false;
+	/* Dirty flags live in LIVE coordinates; only meaningful while the
+	 * viewport sits at the live tail (view 0). Above the tail every
+	 * refresh repaints every line, so the flags simply wait. */
+	if (term->sb.view == 0)
+		scr->line_dirty[line] = ((term->mode & MODE_CURSOR) && scr->cursor.y == line) ? true: false;
+}
+
+/* History slider in the right edge: the leftover pixels the grid yields
+ * to it (two on the 320-wide 6x12 default), dim-grey track, bright-grey
+ * thumb. Visible only while rows are actually stored and on the primary
+ * (the alt screen is the app's frame). The thumb sizes with the live
+ * window, lines/(lines+count) of the strip, and rides the view. Its
+ * shadow-mode flush runs after the per-line ones, so the bar blits its
+ * own columns. */
+static void fb_scrollbar(struct framebuffer_t *fb, struct terminal_t *term)
+{
+	int rem, bx, bh, th, rel, x, y;
+	uint32_t track, thumb;
+	uint8_t *dest = fb_draw_dest(fb);
+	int bpp = fb->info.bytes_per_pixel;
+	int ll = fb->info.line_length;
+
+	if (term->sb.count == 0 || term->active != 0)
+		return;
+	rem = term->width - term->cols * CELL_WIDTH;
+	if (rem < 2)
+		return;
+
+	bx = term->width - rem;
+	bh = term->lines * CELL_HEIGHT;
+	th = (bh * term->lines) / (term->lines + (int)term->sb.count);
+	if (th < 1)
+		th = 1;
+	rel = ((bh - th) * (int)term->sb.view) / (int)term->sb.count;
+
+	track = fb->real_palette[8];
+	thumb = fb->real_palette[7];
+
+	for (y = 0; y < bh; y++) {
+		uint32_t v = (rel <= y && y < rel + th) ? thumb: track;
+		for (x = 0; x < rem; x++)
+			memcpy(dest + (long)(term->oy + y) * ll + (long)(bx + x) * bpp, &v, bpp);
+	}
+
+	if (fb->buf)
+		for (y = term->oy; y < term->oy + bh; y++)
+			memcpy(fb->fp + (long)y * ll + (long)bx * bpp,
+			       fb->buf + (long)y * ll + (long)bx * bpp, (long)rem * bpp);
 }
 
 void refresh(struct framebuffer_t *fb, struct terminal_t *term)
@@ -546,10 +604,18 @@ void refresh(struct framebuffer_t *fb, struct terminal_t *term)
 	fb_paint_margin(fb, term);
 
 	for (int line = 0; line < term->lines; line++) {
-		if (scr->line_dirty[line]) {
-			draw_line(fb, term, line);
-		}
+		/* Browsing history repaints the whole window on every refresh
+		 * (stored rows are immutable; the live dirty flags index live
+		 * rows, not logical lines, so per-line tracking only holds at
+		 * the live tail). */
+		bool dirty = (term->sb.view == 0) ? scr->line_dirty[line]: true;
+
+		if (dirty)
+			draw_line(fb, term, line, sb_view_row(term, line));
 	}
+
+	/* History scrollbar in the right edge strip (no-op when empty). */
+	fb_scrollbar(fb, term);
 
 	/* Status bar in the top strip (no-op when disabled) */
 	statusbar_render(fb, term);

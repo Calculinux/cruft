@@ -797,6 +797,11 @@ int main(void)
 			"wlan0: 0000   49.  -61.  -256        0  0  0  0 210 0",
 			"wlan0") == -61,
 			"O wireless level -61 dBm");
+		/* kernel field-format: name right-justified to six chars */
+		expect(sb_wireless_level(
+			" wlan0: 0000   49.  -61.  -256        0  0  0  0 210 0",
+			"wlan0") == -61,
+			"O wireless padded row (kernel fmt)");
 		expect(sb_wireless_level("wlan1: 0000   49.  -61.  -256",
 			"wlan0") == -999,
 			"O wireless wrong iface");

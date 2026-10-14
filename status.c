@@ -231,19 +231,29 @@ static void sb_retain(const char *root, char *slot, const char *probe)
  * per-BSS dBm reading and outlives drivers that stop populating the WEXT
  * compat proc; resolve the family via CTRL_CMD_GETFAMILY, genl version 2. */
 
-/* Level column of one /proc/net/wireless line
- * ("wlan0: 0000   49.  -61.  -256  ..."; fields after the colon: status,
- * quality, Level in dBm, noise). -999 when the line is not for our
- * interface or the Level is absent/invalid. Pure; golden-tested. */
+/* Level column of one /proc/net/wireless line. The kernel field-formats
+ * the interface name (six-char right-justified), so rows look like
+ * " wlan0: 0000   49.  -61.  -256  ..."; leading/trivial padding is
+ * tolerated. Fields after the colon: status, quality, Level in dBm,
+ * noise. -999 when the line is not for our interface or the Level is
+ * absent/invalid. Pure; golden-tested. */
 int sb_wireless_level(const char *line, const char *ifname)
 {
 	size_t n = strlen(ifname);
-	const char *c;
+	const char *s, *c;
 	double lvl;
 
-	if (strncmp(line, ifname, n) != 0 || line[n] != ':')
+	s = line;
+	while (*s == ' ')
+		s++;
+	if (strncmp(s, ifname, n) != 0)
 		return -999;
-	c = line + n + 1;
+	s += n;
+	while (*s == ' ')
+		s++;
+	if (*s != ':')
+		return -999;
+	c = s + 1;
 	if (sscanf(c, " %*s %*s %lf", &lvl) != 1)
 		return -999;
 	if (lvl >= -1 || lvl < -128)

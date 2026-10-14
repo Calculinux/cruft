@@ -62,6 +62,7 @@ enum char_attr {
 
 enum osc {
 	OSC_GWREPT = 8900, /* OSC Ps: mode number of cruft GWREPT */
+	OSC_KITTY_GRAPHICS = 1337, /* kitty graphics protocol (File;/Image;) */
 };
 
 enum term_mode {
@@ -127,6 +128,23 @@ struct sixel_canvas_t {
 	uint32_t color_table[COLORS];
 };
 
+/* One parsed OSC 1337 argument list (kitty graphics protocol).
+ * Pointer members borrow memory from the caller's escape buffer, valid
+ * until reset_esc(). */
+struct kitty_args {
+	const char *action;      /* "File" or "Image" */
+	const char *data;        /* payload (base64 or raw, see .base64) */
+	size_t data_len;
+	long width, height;      /* -1 = not given (mandatory for raw) */
+	int preserve_aspect;    /* a=, default 1 */
+	int base64;             /* b=, default 1 */
+	int transparency;       /* t=, default 0 */
+	const char *id;         /* i= transfer id (Image); length: id_len */
+	size_t id_len;          /* 0 = absent */
+	const char *method;     /* m= operation (Image); length: method_len */
+	size_t method_len;      /* 0 = absent */
+};
+
 struct terminal_t {
 	int fd;                                  /* master of pseudo terminal */
 	int width, height;                       /* terminal size (pixel) */
@@ -176,6 +194,11 @@ void term_release_transient(struct terminal_t *term);
 size_t sixel_cell_row_bytes(int cell_x, int term_width);
 void reset_sixel(struct terminal_t *term, struct color_pair_t color_pair, int width, int height);
 void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc);
+
+/* kitty_image.c */
+int kitty_base64_decode(const char *in, size_t len, uint8_t *out, size_t cap, size_t *out_len);
+int kitty_args_parse(const char *payload, struct kitty_args *ka);
+void kitty_image_dispatch(struct terminal_t *term, const char *payload);
 
 /* terminal cells (terminal_cell.c) */
 void erase_cell(struct terminal_t *term, int y, int x);

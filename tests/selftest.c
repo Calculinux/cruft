@@ -1361,6 +1361,9 @@ int main(void)
 		expect(term.sb.count == 0 && term.sb.view == 0, "T RIS empties ring");
 		expect(sb_consume_nav(&term, meta_up, 4) == 0,
 			"T no history: nav passes through");
+		/* tear down this generation before the re-init below, which
+		 * would otherwise leak the ring, matrices and esc buffer */
+		term_die(&term);
 
 		/* CRUFT_HISTORY=0 disables the ring entirely */
 		setenv("CRUFT_HISTORY", "0", 1);
@@ -1471,6 +1474,7 @@ int main(void)
 			expect(m_px_at(mfp, 319, 100) == 0x07070707u, "T bar thumb");
 			expect(m_px_at(mfp, 318, 305) == 0x08080808u, "T bar track (below thumb)");
 			expect(m_px_at(mfp, 318, 315) == 0x00000000u, "T below grid is margin, not bar");
+			free(mfp);
 		}
 		term_die(&term);
 	}

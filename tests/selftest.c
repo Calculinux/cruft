@@ -2106,8 +2106,19 @@ int main(void)
 					free(sq);
 					close(rp[1]);
 					rp[1] = -1;
-					memset(got, 0, sizeof got);
-					(void) read(rp[0], got, sizeof got - 1);
+					{
+						long off = 0;
+						ssize_t rd = 1;
+
+						memset(got, 0, sizeof got);
+						/* drain to EOF: a single read() may legitimately
+						 * return a partial buffer */
+						while (off < (long) (sizeof got - 1) &&
+						       (rd = read(rp[0], got + off,
+							        (size_t) (sizeof got - 1 - off))) > 0)
+							off += (long) rd;
+						expect(off > 0 && rd <= 0, "U7 drained to EOF");
+					}
 					close(rp[0]);
 					rp[0] = -1;
 					expect(strstr(got, "\033]1337;Rep;i=u42;ok=false;") != NULL,

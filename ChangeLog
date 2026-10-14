@@ -169,3 +169,22 @@ $ make yaft
 	main buffer
 -	selftest links the real terminal.h (dropped the move_cursor
 	stub); section S covers the DECALT lifecycle end to end
+
+## 2026-10-13
+-	scrollback ring (scrollback.c): full-primary scroll-ups on the main
+	screen drain copied rows (deep-copied sixel pixmaps, 64 KiB payload
+	cap, oldest art degrades first); CRUFT_HISTORY depth (default 96,
+	clamp 1024, 0 = off), lazy per-row allocation
+-	history viewport: sb.view lifts stored rows above the live screen;
+	whole-window repaint while browsing (live dirty flags stay in live
+	renderer coordinates); Meta-Up/Down/Prior/Next/Home/End navigate
+	(CSI and SS3 forms), bare arrows pass through, any foreign key
+	snaps back to the live tail; alt screen keeps the keys for the app
+-	2px scrollbar in the right edge: first stored row anchors the grid
+	left (centred leftover moves right, 1px at 6x12/320), track/thumb
+	in the yielded strip; no strip where the font divides the width
+	exactly
+-	RIS clears the ring, DECALT entry ends browsing; DRCS charset free
+	scrubs history cells referencing the table (no dangling glyphs)
+-	selftest section T: feeding rules, eviction order, viewport
+	mapping, nav keys, pixmap cap, disabled mode

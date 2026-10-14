@@ -72,14 +72,21 @@ void scroll(struct terminal_t *term, int from, int to, int offset)
 	abs_offset = abs(offset);
 	scroll_lines = (to - from + 1) - abs_offset;
 
-	if (offset > 0) { /* scroll down */
+	if (offset > 0) { /* content moves up; the top rows are lost */
 		for (int y = from; y < from + scroll_lines; y++)
 			swap_lines(term, y, y + offset);
+		/* The rows the erase loop is about to destroy drain into the
+		 * scrollback ring — but only for full-primary scrolls:
+		 * sub-regions are app internals (editor panes) and the alt
+		 * screen is wiped on entry anyway, so neither feeds history. */
+		if (term->active == 0 && from == 0 && to == term->lines - 1)
+			for (int y = (to - abs_offset + 1); y <= to; y++)
+				sb_feed_line(term, active_screen(term)->cells[y]);
 		for (int y = (to - offset + 1); y <= to; y++)
 			for (int x = 0; x < term->cols; x++)
 				erase_cell(term, y, x);
 	}
-	else {            /* scroll up */
+	else {            /* content moves down; the bottom rows are lost */
 		for (int y = to; y >= from + abs_offset; y--)
 			swap_lines(term, y, y - abs_offset);
 		for (int y = from; y < from + abs_offset; y++)
@@ -349,6 +356,9 @@ void reset(struct terminal_t *term)
 
 	term->attribute = ATTR_RESET;
 
+	/* RIS is a hard reset of everything the user sees, history included. */
+	sb_reset(term);
+
 	screen_clear(term);
 	term->state.cursor = active_screen(term)->cursor;
 
@@ -377,6 +387,9 @@ void enter_alt_screen(struct terminal_t *term)
 
 	if (term->active == 1)
 		return;
+
+	/* The app owns the whole frame: any history browsing ends here. */
+	term->sb.view = 0;
 
 	term->alt_saved.cursor = active_screen(term)->cursor;
 	term->alt_saved.scroll = active_screen(term)->scroll;
@@ -418,6 +431,7 @@ void term_die(struct terminal_t *term)
 	for (i = 0; i < 2; i++)
 		screen_matrix_free(term, &term->scr[i]);
 
+	sb_die(term);
 	drcs_clear_all(term);
 	sixel_canvas_free(term);
 
@@ -448,6 +462,7 @@ bool term_init(struct terminal_t *term, int width, int height)
 	term->scr[0]    = (struct screen_t) {0};
 	term->scr[1]    = (struct screen_t) {0};
 	term->alt_saved = (struct alt_saved_t) {0};
+	term->sb        = (struct scrollback_t) {0};
 
 	/* allocate memory (primary screen only) */
 	term->esc.buf      = (char *) ecalloc(1, term->esc.size);
@@ -466,6 +481,9 @@ bool term_init(struct terminal_t *term, int width, int height)
 	term->palette_modified = false;
 
 	/* glyphs loaded via glyph_mmap_init() before term_init() */
+
+	/* scrollback ring: depth from CRUFT_HISTORY (lazy per row). */
+	sb_init(term);
 
 	/* reset terminal */
 	reset(term);

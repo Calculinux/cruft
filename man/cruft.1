@@ -21,6 +21,32 @@ strip above the cell grid: the clock in the centre, and a wifi signal
 stair and battery indicator on the right. A segment whose data source is
 absent (bare hardware, VM) is hidden; a missing or unsuitable status
 font disables the bar entirely and the grid reclaims the full screen.
+.PP
+Lines that scroll off the top of the main screen are kept in a
+scrollback ring (see
+.BR CRUFT_HISTORY ).
+While any history is stored, a thin scrollbar in the right edge of the
+grid shows the current position; full-screen programs run on the
+alternate screen and never pollute the history.
+.SH KEYBOARD
+.PP
+History navigation keys (all require the Meta/Alt modifier; the bare
+arrows remain readline's):
+.RS
+.TP
+Meta-Up / Meta-Down
+one line deeper into / out of the history
+.TP
+Meta-Prior / Meta-Next
+half a page (Prior: deeper; Next: towards the live screen)
+.TP
+Meta-Home / Meta-End
+oldest stored row / live tail
+.RE
+.PP
+Any other key while browsing scrolls back to the live tail and is
+delivered to the program. Sequences are matched only at the start of a
+keypress, so a split-delivery ESC will occasionally pass through.
 .SH CUSTOMIZATION
 .PP
 Rewrite conf.h before make.
@@ -54,6 +80,12 @@ or
 (or
 .BR 0 )
 to disable the bar. Unknown names are ignored with a warning.
+.TP
+.B CRUFT_HISTORY
+Scrollback depth in rows (default 96, capped at 1024).
+0 disables the ring and the scrollbar. Stored rows carry copied cell
+contents; sixel pixmaps in history are deep-copied up to a 64 KiB
+budget, oldest art degrading to blank beyond it.
 .TP
 .B CRUFT_SB_12H
 Set to 1 for a 12-hour clock (\fIH:MMam/pm\fP); the default is

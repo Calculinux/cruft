@@ -17,7 +17,14 @@
 #include "util.h"
 #include "fb/common.h"
 #include "status.h"
+/* Unity headers, mirrored from cruft.c: the U section drives the real
+ * parse() so the OSC 1337 intercept is covered end to end. */
 #include "terminal.h"
+#include "ctrlseq/esc.h"
+#include "ctrlseq/csi.h"
+#include "ctrlseq/osc.h"
+#include "ctrlseq/dcs.h"
+#include "parse.h"
 
 const uint32_t color_list[COLORS];
 
@@ -40,12 +47,9 @@ const char *fb_path = "/dev/fb0";
 const char *shell_cmd = "/bin/bash";
 const char *sb_default_segments = "all";
 
-/* cr() lives in ctrlseq/esc.h (not linked here); move_cursor/scroll/etc.
- * are the real terminal.h definitions. */
-void cr(struct terminal_t *term)
-{
-	(void)term;
-}
+/* NOTE: move_cursor / cr / set_cursor / scroll are the REAL functions
+ * (terminal.h, included above) — no no-op stubs: the U section asserts
+ * kitty placement cursor bookkeeping through them. */
 
 static int failures;
 
@@ -377,6 +381,103 @@ static int alloc_term_grid(struct terminal_t *term, int width, int height)
 			return -1;
 	}
 	return 0;
+}
+
+/* U-section helpers: drive the real parse() on a 10x2 cell (60x24 px @
+ * 6x12) grid with a white background colour (index 7). */
+
+static const char st_b64a[] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void st_b64enc(const uint8_t *in, size_t n, char *out)
+{
+	size_t i = 0, o = 0;
+
+	while (i + 2 < n) {
+		uint32_t v = ((uint32_t) in[i] << 16) |
+			     ((uint32_t) in[i + 1] << 8) | in[i + 2];
+
+		out[o++] = st_b64a[(v >> 18) & 63];
+		out[o++] = st_b64a[(v >> 12) & 63];
+		out[o++] = st_b64a[(v >> 6) & 63];
+		out[o++] = st_b64a[v & 63];
+		i += 3;
+	}
+	if (i + 1 == n) {
+		uint32_t v = (uint32_t) in[i] << 16;
+
+		out[o++] = st_b64a[(v >> 18) & 63];
+		out[o++] = st_b64a[(v >> 12) & 63];
+		out[o++] = '=';
+		out[o++] = '=';
+	} else if (i + 2 == n) {
+		uint32_t v = ((uint32_t) in[i] << 16) |
+			     ((uint32_t) in[i + 1] << 8);
+
+		out[o++] = st_b64a[(v >> 18) & 63];
+		out[o++] = st_b64a[(v >> 12) & 63];
+		out[o++] = st_b64a[(v >> 6) & 63];
+		out[o++] = '=';
+	}
+	out[o] = '\0';
+}
+
+static int u_setup(struct terminal_t *term)
+{
+	if (alloc_term_grid(term, 60, 24) < 0)
+		return -1;
+	active_screen(term)->cursor.x = active_screen(term)->cursor.y = 0;
+	active_screen(term)->scroll.top = 0;
+	active_screen(term)->scroll.bottom = term->lines - 1;
+	term->color_pair.fg = 7;
+	term->color_pair.bg = 7;
+	for (int i = 0; i < COLORS; i++)
+		term->virtual_palette[i] = (uint32_t) i * 0x01010101u;
+	term->virtual_palette[7] = 0x00FFFFFF; /* white, for alpha maths */
+	term->esc.size = ESCSEQ_SIZE;
+	term->esc.buf = (char *) calloc(1, (size_t) term->esc.size);
+	term->esc.bp = term->esc.buf;
+	term->esc.state = STATE_RESET;
+	return term->esc.buf ? 0 : -1;
+}
+
+static void u_teardown(struct terminal_t *term)
+{
+	free_term_cells(term);
+	free(term->esc.buf);
+	term->esc.buf = NULL;
+}
+
+/* "ESC ] 1337 ; action ; middle (BEL|ST)"; middle empty or "k=v;k2=v2...". */
+static uint8_t *u_osc1337(const char *action, const char *middle, int bel)
+{
+	size_t mn = strlen(action);
+	size_t nn = strlen(middle);
+	size_t n = 1 + 1 + 4 + 1 + mn + (nn ? nn + 1 : 0) + 1 + 1;
+	uint8_t *buf = (uint8_t *) malloc(n + 1);
+	size_t o = 0;
+
+	if (!buf)
+		return NULL;
+	buf[o++] = ESC;
+	buf[o++] = ']';
+	memcpy(buf + o, "1337;", 5);
+	o += 5;
+	memcpy(buf + o, action, mn);
+	o += mn;
+	if (nn) {
+		buf[o++] = ';';
+		memcpy(buf + o, middle, nn);
+		o += nn;
+	}
+	if (bel)
+		buf[o++] = BEL;
+	else {
+		buf[o++] = ESC;
+		buf[o++] = BACKSLASH;
+	}
+	buf[o] = '\0';
+	return buf;
 }
 
 int main(void)
@@ -1758,6 +1859,270 @@ int main(void)
 		term_die(&term);
 		unsetenv("CRUFT_HISTORY");
 		unsetenv("CRUFT_SB_RAM");
+	}
+
+	/* U: kitty graphics protocol (OSC 1337) end-to-end through parse() */
+	{
+		struct screen_t *su = active_screen(&term);
+		char utml[] = "/tmp/cruft-st-U-XXXXXX";
+		char ufont[80];
+		int fut = mkstemp(utml);
+
+		expect(fut >= 0, "V mkstemp");
+		if (fut >= 0) {
+			close(fut);
+			unlink(utml);
+			snprintf(ufont, sizeof ufont, "%s.cruftfont", utml);
+			expect(write_tiny_font6x12(ufont) == 0, "V write 6x12 font");
+			expect(glyph_mmap_init(ufont) == 1, "V glyph init");
+			unlink(ufont);
+
+			/* U1: base64 decode golden vectors */
+			{
+				uint8_t dec[64];
+				size_t dl;
+
+				expect(kitty_base64_decode("TWFu", 4, dec, sizeof dec, &dl) == 0
+					&& dl == 3 && memcmp(dec, "Man", 3) == 0, "V1 Man");
+				expect(kitty_base64_decode("SGVsbG8sIHdvcmxkIQ==", 20, dec,
+					sizeof dec, &dl) == 0 && dl == 13
+					&& memcmp(dec, "Hello, world!", 13) == 0, "V1 padded");
+				expect(kitty_base64_decode("SGVsbG8sIHdvcmxkIQ", 18, dec,
+					sizeof dec, &dl) == 0 && dl == 13, "V1 unpadded");
+				expect(kitty_base64_decode("", 0, dec, sizeof dec, &dl) == 0
+					&& dl == 0, "V1 empty");
+				expect(kitty_base64_decode("A", 1, dec, sizeof dec, &dl) == -1,
+					"V1 len%%4==1 rejected");
+				expect(kitty_base64_decode("TWF!", 4, dec, sizeof dec, &dl) == -1,
+					"V1 bad char rejected");
+				expect(kitty_base64_decode("TWE=", 4, dec, 1, &dl) == -1,
+					"V1 undersized out rejected");
+				expect(kitty_base64_decode("T=W=", 4, dec, sizeof dec, &dl) == -1,
+					"V1 interior pad rejected");
+			}
+
+			/* U2: OSC 1337 argument parsing */
+			{
+				struct kitty_args ka;
+
+				expect(kitty_args_parse("File;w=200;h=100;a=no;b=yes;t=YES;QQQ==",
+					&ka) == 0, "V2 parse File");
+				expect(strcmp(ka.action, "File") == 0
+					&& ka.width == 200 && ka.height == 100, "V2 dims");
+				expect(ka.preserve_aspect == 0 && ka.base64 == 1
+					&& ka.transparency == 1, "V2 flags");
+				expect(ka.data != NULL && strcmp(ka.data, "QQQ==") == 0
+					&& ka.data_len == 5, "V2 padded tail is data");
+				expect(kitty_args_parse("File;data=QUJD", &ka) == 0
+					&& strcmp(ka.data, "QUJD") == 0 && ka.data_len == 4,
+					"V2 explicit data=");
+				expect(kitty_args_parse("File", &ka) == -1,
+					"V2 File without data rejected");
+				expect(kitty_args_parse("Bogus;x", &ka) == -1,
+					"V2 unknown action rejected");
+				expect(kitty_args_parse("File;w=abc", &ka) == -1,
+					"V2 non-numeric dim rejected");
+				expect(kitty_args_parse("File;w=70000;Q", &ka) == -1,
+					"V2 dim over clamp rejected");
+				expect(kitty_args_parse("File;z=1;QUJD", &ka) == 0
+					&& strcmp(ka.data, "QUJD") == 0,
+					"V2 unknown key ignored");
+				expect(kitty_args_parse("Image;i=abc;m=resize", &ka) == 0
+					&& ka.id != NULL && ka.id_len == 3
+					&& strncmp(ka.id, "abc", 3) == 0
+					&& ka.method != NULL && ka.method_len == 6
+					&& strncmp(ka.method, "resize", 6) == 0
+					&& ka.data == NULL, "V2 Image needs no data");
+				expect(kitty_args_parse("File;iVBob3dlZHNpcw==", &ka) == 0
+					&& strcmp(ka.data, "iVBob3dlZHNpcw==") == 0,
+					"V2 payload led by key letter stays data");
+			}
+
+			/* U3: raw BGR placement, one cell, via real parse() */
+			{
+				uint8_t px[6 * 12 * 3];
+				char b64[512], mid[600];
+				uint8_t *sq;
+
+				for (int k = 0; k < 6 * 12; k++) {
+					px[k * 3 + 0] = 0x34; /* B */
+					px[k * 3 + 1] = 0x12; /* G */
+					px[k * 3 + 2] = 0x78; /* R */
+				}
+				st_b64enc(px, sizeof px, b64);
+				snprintf(mid, sizeof mid, "w=6;h=12;%s", b64);
+				expect(u_setup(&term) == 0, "V3 alloc");
+				sq = u_osc1337("File", mid, 0);
+				expect(sq != NULL, "V3 seq alloc");
+				if (sq) {
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+				}
+				expect(su->cells[0][0].has_pixmap && su->cells[0][0].pixmap,
+					"V3 cell got pixmap");
+				if (su->cells[0][0].pixmap) {
+					const uint8_t *p = su->cells[0][0].pixmap;
+					const uint8_t *pe = p + (6 * 12 - 1) * 4;
+
+					expect(p[0] == 0x34 && p[1] == 0x12 && p[2] == 0x78
+						&& p[3] == 0x00 && pe[3] == 0x00,
+						"V3 BGR->RGB 0x00781234");
+				}
+				expect(su->cursor.x == 0 && su->cursor.y == 1,
+					"V3 cursor below image");
+				expect(!su->cells[0][1].has_pixmap
+					&& !su->cells[1][0].has_pixmap,
+					"V3 neighbours untouched");
+				u_teardown(&term);
+			}
+
+			/* U4: alpha handling (t= semantics) */
+			{
+				uint8_t px[6 * 12 * 4];
+				char b64[512], mid[600];
+				uint8_t *sq;
+				const uint8_t *p;
+
+				for (int k = 0; k < 6 * 12; k++) {
+					px[k * 4 + 0] = 0;
+					px[k * 4 + 1] = 0;
+					px[k * 4 + 2] = 0;
+					px[k * 4 + 3] = 128;
+				}
+				st_b64enc(px, sizeof px, b64);
+
+				/* t=yes: black at a=128 over white bg -> 127 */
+				snprintf(mid, sizeof mid, "w=6;h=12;t=yes;%s", b64);
+				expect(u_setup(&term) == 0, "V4 alloc");
+				sq = u_osc1337("File", mid, 0);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				p = su->cells[0][0].pixmap;
+				expect(p && p[0] == 0x7F && p[1] == 0x7F && p[2] == 0x7F,
+					"V4 t=yes blends over bg");
+				u_teardown(&term);
+
+				/* default t=no: alpha dropped (opaque) */
+				snprintf(mid, sizeof mid, "w=6;h=12;%s", b64);
+				expect(u_setup(&term) == 0, "U4b alloc");
+				sq = u_osc1337("File", mid, 0);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				p = su->cells[0][0].pixmap;
+				expect(p && p[0] == 0x00 && p[1] == 0x00 && p[2] == 0x00,
+					"U4b t=no renders opaque");
+				u_teardown(&term);
+			}
+
+			/* U5: aspect-preserving downscale (0.5x) */
+			{
+				uint8_t px[120 * 24 * 3];
+				char b64[12288];
+				char *mid;
+				uint8_t *sq;
+
+				for (int sx = 0; sx < 120; sx++) {
+					for (int sy = 0; sy < 24; sy++) {
+						uint8_t *p = &px[(sy * 120 + sx) * 3];
+
+						if (sx < 60) { /* red */
+							p[0] = 0; p[1] = 0; p[2] = 255;
+						} else { /* blue */
+							p[0] = 255; p[1] = 0; p[2] = 0;
+						}
+					}
+				}
+				st_b64enc(px, sizeof px, b64);
+				mid = (char *) malloc(12 + strlen(b64));
+				expect(mid != NULL, "V5 mid alloc");
+				if (mid) {
+					snprintf(mid, 12 + strlen(b64), "w=120;h=24;%s", b64);
+					expect(u_setup(&term) == 0, "V5 alloc");
+					sq = u_osc1337("File", mid, 0);
+					free(mid);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					/* 120x24 fits 60x24 at s=0.5: tw=60 th=12 */
+					expect(su->cells[0][0].pixmap
+						&& su->cells[0][0].pixmap[2] == 0xFF
+						&& su->cells[0][0].pixmap[0] == 0x00,
+						"V5 left half stays red");
+					expect(su->cells[0][5].pixmap
+						&& su->cells[0][5].pixmap[0] == 0xFF
+						&& su->cells[0][5].pixmap[2] == 0x00,
+						"V5 right half stays blue");
+					expect(!su->cells[1][0].has_pixmap,
+						"V5 12px fills one cell row");
+					expect(su->cursor.x == 0 && su->cursor.y == 1,
+						"V5 cursor below image");
+					u_teardown(&term);
+				}
+			}
+
+			/* U6: malformed / over-budget payloads drop cleanly */
+			{
+				uint8_t *sq;
+
+				expect(u_setup(&term) == 0, "V6 alloc");
+				sq = u_osc1337("File", "QUJD", 0); /* raw, no w/h */
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(!su->cells[0][0].has_pixmap,
+					"V6 raw without w/h dropped");
+
+				sq = u_osc1337("File", "w=65535;h=65535;QUJD", 0);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(!su->cells[0][0].has_pixmap, "V6 px budget honoured");
+
+				sq = u_osc1337("File", "w=6;h=12;!!!!", 0);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(!su->cells[0][0].has_pixmap, "V6 bad b64 dropped");
+				expect(su->cursor.x == 0 && su->cursor.y == 0,
+					"V6 dropped transfers move nothing");
+				u_teardown(&term);
+			}
+
+			/* U7: Image; operations get a polite Rep (no stalls) */
+			{
+				int rp[2] = { -1, -1 };
+				char got[512];
+
+				expect(pipe(rp) == 0, "V7 pipe");
+				if (rp[0] >= 0) {
+					uint8_t *sq;
+
+					expect(u_setup(&term) == 0, "V7 alloc");
+					term.fd = rp[1];
+					sq = u_osc1337("Image", "i=u42;m=query", 1);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					sq = u_osc1337("Image", "i=u42;m=delete", 1);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					sq = u_osc1337("Image", "i=u42;m=new", 1);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					close(rp[1]);
+					rp[1] = -1;
+					memset(got, 0, sizeof got);
+					(void) read(rp[0], got, sizeof got - 1);
+					close(rp[0]);
+					rp[0] = -1;
+					expect(strstr(got, "\033]1337;Rep;i=u42;ok=false;") != NULL,
+						"V7 Rep framing");
+					expect(strstr(got, "t=not_found") != NULL,
+						"V7 query/delete not_found");
+					expect(strstr(got, "t=failed") != NULL,
+						"V7 new failed");
+				}
+				u_teardown(&term);
+			}
+
+
+			glyph_mmap_die();
+		}
 	}
 
 	if (failures) {

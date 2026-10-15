@@ -1459,6 +1459,34 @@ int main(void)
 				"T plain key while browsing snaps to live");
 		}
 
+		/* Back to the tail: stored rows leave the live lines clean, so
+		 * every line must be re-flagged or the lazy painter would
+		 * keep history pixels on screen. */
+		for (int y = 0; y < term.lines; y++)
+			tscr->line_dirty[y] = false;
+		term.sb.view = 3;
+		{
+			bool all = true;
+
+			expect(sb_consume_nav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+				"T ctrl-end settles at the tail from deep");
+			for (int y = 0; y < term.lines; y++)
+				all &= tscr->line_dirty[y];
+			expect(all, "T ctrl-end re-dirties every line");
+		}
+		for (int y = 0; y < term.lines; y++)
+			tscr->line_dirty[y] = false;
+		term.sb.view = 3;
+		{
+			bool all = true;
+
+			expect(sb_consume_nav(&term, mixed, 5) == 4 && term.sb.view == 0,
+				"T foreign byte snaps to live");
+			for (int y = 0; y < term.lines; y++)
+				all &= tscr->line_dirty[y];
+			expect(all, "T snap-back re-dirties every line");
+		}
+
 		/* RIS resets the ring; an empty ring lets nav pass through */
 		reset(&term);
 		expect(term.sb.count == 0 && term.sb.view == 0, "T RIS empties ring");

@@ -247,14 +247,28 @@ static const enum sb_action nav_actions[] = {
 	SB_PAGE_UP, SB_PAGE_DOWN, SB_TOP, SB_BOTTOM,
 };
 
+/* The view snaps back to the live tail. Stored rows are immutable, so
+ * the live lines stayed clean while we browsed and the lazy drawer
+ * would leave history pixels on screen; re-flag every line so the
+ * next refresh repaints the whole grid. */
+static void sb_flag_all_lines(struct terminal_t *term)
+{
+	struct screen_t *scr = active_screen(term);
+
+	for (int y = 0; y < term->lines; y++)
+		scr->line_dirty[y] = true;
+}
+
 static void sb_apply(struct terminal_t *term, enum sb_action action)
 {
 	struct scrollback_t *sb = &term->sb;
 	unsigned total = sb_history_total(term);
 	unsigned half = term->lines / 2;
+	unsigned old_view;
 
 	if (half < 1)
 		half = 1;
+	old_view = sb->view;
 	switch (action) {
 	case SB_PAGE_UP:
 		sb->view = (sb->view + half < total) ? sb->view + half: total;
@@ -269,6 +283,8 @@ static void sb_apply(struct terminal_t *term, enum sb_action action)
 		sb->view = 0;
 		break;
 	}
+	if (sb->view == 0 && old_view != 0)
+		sb_flag_all_lines(term);
 }
 
 /* Bytes of the leading navigation run (0 = nothing to intercept: the
@@ -311,8 +327,10 @@ int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n)
 	 * terminals snap back to the bottom on the first foreign key, and a
 	 * mouseless console needs that (typing blind over stale history is
 	 * the trap). Lone ESC included. */
-	if (consumed < (unsigned)n && term->sb.view != 0)
+	if (consumed < (unsigned)n && term->sb.view != 0) {
 		term->sb.view = 0;
+		sb_flag_all_lines(term);
+	}
 	return (int)consumed;
 }
 

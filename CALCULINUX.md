@@ -134,6 +134,15 @@ wifi stair + battery right. `term_init` shrinks the grid by
   `none`);
   `CRUFT_SB_12H=1` switches the clock to 12h. Compile-time
   default: `sb_default_segments` in `conf.h`.
+- Configuration (`conf.c`): `/etc/cruft.conf` (KEY=VALUE, `#`
+  comments) supplies persistent defaults for the `CRUFT_FONT`,
+  `CRUFT_SB`, `CRUFT_SB_FONT`, `CRUFT_SB_12H`, `CRUFT_HISTORY` and
+  `CRUFT_SB_RAM` knobs. Precedence: environment > file > built-in
+  constant, so a per-service `Environment=` line or an exported
+  variable still wins. `conf_load()` runs before the first consumer
+  (font). Unknown keys and malformed values are skipped with a WARN —
+  a bad line must never take the console down. Selftest section V
+  covers grammar, validity and precedence.
 - Dual-font: `glyph_sb_*` in `glyph_mmap.c` is a second instance of the
   demand-paged `CRUFTFN1` loader (4x8/24 metrics only); the main font
   path is untouched. FB type shapes live in `fb/fb.h` (definitions-free,

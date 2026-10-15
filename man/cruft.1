@@ -131,6 +131,18 @@ Set to 1 for a 12-hour clock (\fIH:MMam/pm\fP); the default is
 Path to the 4x8 CRUFTFN1 status font
 (default /usr/share/cruft/status.cruftfont, installed by the
 miniwi-console package).
+.SH CONFIGURATION
+.PP
+Persistent defaults can be set in
+.B /etc/cruft.conf ,
+one \fIKEY=VALUE\fP per line (\fB#\fP comments, blank lines and
+whitespace around the \fB=\fP are ignored). The recognised keys are
+exactly the environment variables above; the built-in default applies
+when neither the file nor the environment sets a key. Precedence:
+environment (per-service \fBEnvironment=\fP, exported shell variable)
+overrides the file, which overrides the built-in. Unknown keys and
+malformed values are skipped with a warning; a missing or empty file
+changes nothing.
 .SH AUTHOR
 .PP
 Calculinux fork; upstream yaft by haru <uobikiemukot at gmail dot com>

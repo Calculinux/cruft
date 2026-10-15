@@ -1930,6 +1930,85 @@ int main(void)
 		unsetenv("CRUFT_SB_RAM");
 	}
 
+	/* V: /etc/cruft.conf loader (conf.c): grammar, validity, and
+	 * environment precedence. */
+	{
+		static const char *vkeys[6] = {
+			"CRUFT_FONT", "CRUFT_SB", "CRUFT_SB_FONT",
+			"CRUFT_SB_12H", "CRUFT_HISTORY", "CRUFT_SB_RAM",
+		};
+		char *saved[6];
+		char tp[64];
+
+		for (int i = 0; i < 6; i++) {
+			const char *v = getenv(vkeys[i]);
+
+			saved[i] = (v == NULL) ? NULL: strdup(v);
+			unsetenv(vkeys[i]);
+		}
+		snprintf(tp, sizeof(tp), "/tmp/cruft-conf-%d", (int) getpid());
+		conf_load_file("/nonexistent/cruft.conf-V");
+		expect(getenv("CRUFT_HISTORY") == NULL, "V missing file is a no-op");
+
+		FILE *cf;
+		unlink(tp);
+		cf = fopen(tp, "w");
+		expect(cf != NULL, "V temp path ready");
+		fputs("# V well-formed config\n"
+		      "CRUFT_FONT=/x.fnt\n"
+		      "CRUFT_SB=time,battery\n"
+		      "CRUFT_SB_FONT=/s.fnt\n"
+		      "CRUFT_SB_12H=1\n"
+		      "  CRUFT_HISTORY = 8192  \n"
+		      "CRUFT_SB_RAM=256\n", cf);
+		fclose(cf);
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_FONT"), "/x.fnt") == 0
+		       && strcmp(getenv("CRUFT_SB"), "time,battery") == 0
+		       && strcmp(getenv("CRUFT_SB_FONT"), "/s.fnt") == 0
+		       && strcmp(getenv("CRUFT_SB_12H"), "1") == 0,
+			"V font/SB knobs from file");
+		expect(strcmp(getenv("CRUFT_HISTORY"), "8192") == 0
+		       && strcmp(getenv("CRUFT_SB_RAM"), "256") == 0,
+			"V depth knobs (padding trimmed) from file");
+
+		setenv("CRUFT_HISTORY", "77", 1);
+		cf = fopen(tp, "a");
+		fputs("CRUFT_HISTORY=99\n", cf);
+		fclose(cf);
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_HISTORY"), "77") == 0,
+			"V environment beats file");
+		unsetenv("CRUFT_HISTORY");
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_HISTORY"), "99") == 0,
+			"V file value once env is clear");
+
+		cf = fopen(tp, "w");
+		fputs("\n   # only junk below\n"
+		      "CRUFT_HISTORY=abc\n"
+		      "CRUFT_SB=bad value\n"
+		      "CRUFT_SB_12H=2\n"
+		      "CRUFT_SB=\n"
+		      "NOT_A_KEY=1\n"
+		      "no equals here\n"
+		      "CRUFT_FONT\n", cf);
+		fclose(cf);
+		for (int i = 0; i < 6; i++)
+			unsetenv(vkeys[i]);
+		conf_load_file(tp);
+		for (int i = 0; i < 6; i++)
+			expect(getenv(vkeys[i]) == NULL,
+				"V invalid or unknown lines never installed");
+		unlink(tp);
+
+		for (int i = 0; i < 6; i++) {
+			if (saved[i] != NULL)
+				setenv(vkeys[i], saved[i], 1);
+			free(saved[i]);
+		}
+	}
+
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);
 		return 1;

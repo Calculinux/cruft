@@ -210,3 +210,13 @@ $ make yaft
 -	selftest section U: spill/seam mapping, nav over the combined
 	depth, pin-on-push, compaction, pixmap survival on disk,
 	corruption degradation, unlink on reset/die
+
+## 2026-10-15
+-	version 0.2.10
+-	config file /etc/cruft.conf (conf.c): persistent defaults for
+	the CRUFT_FONT/CRUFT_SB/CRUFT_SB_FONT/CRUFT_SB_12H/
+	CRUFT_HISTORY/CRUFT_SB_RAM knobs; environment overrides the
+	file, the file the built-ins; unknown keys and malformed
+	values are skipped with a warning (the console never dies
+	on a bad config line)
+-	selftest section V: grammar, validity, environment precedence

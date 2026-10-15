@@ -333,7 +333,7 @@ static inline int grid_origin_x(const struct terminal_t *term)
 {
 	int rem = term->width - term->cols * CELL_WIDTH;
 
-	if (term->sb.count > 0 && rem >= 2)
+	if (sb_history_total(term) > 0 && rem >= 2)
 		return 0;
 	return rem / 2;
 }
@@ -556,8 +556,9 @@ static void fb_scrollbar(struct framebuffer_t *fb, struct terminal_t *term)
 	uint8_t *dest = fb_draw_dest(fb);
 	int bpp = fb->info.bytes_per_pixel;
 	int ll = fb->info.line_length;
+	unsigned total = sb_history_total(term);
 
-	if (term->sb.count == 0 || term->active != 0)
+	if (total == 0 || term->active != 0)
 		return;
 	rem = term->width - term->cols * CELL_WIDTH;
 	if (rem < 2)
@@ -565,10 +566,10 @@ static void fb_scrollbar(struct framebuffer_t *fb, struct terminal_t *term)
 
 	bx = term->width - rem;
 	bh = term->lines * CELL_HEIGHT;
-	th = (bh * term->lines) / (term->lines + (int)term->sb.count);
+	th = (bh * term->lines) / (term->lines + (int)total);
 	if (th < 1)
 		th = 1;
-	rel = ((bh - th) * (int)term->sb.view) / (int)term->sb.count;
+	rel = ((bh - th) * (int)term->sb.view) / (int)total;
 
 	track = fb->real_palette[8];
 	thumb = fb->real_palette[7];

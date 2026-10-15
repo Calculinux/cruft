@@ -49,37 +49,60 @@ static void sb_shrink_pixmaps(struct terminal_t *term)
 	}
 }
 
-/* CRUFT_HISTORY: ring depth in rows (default SB_DEFAULT_LINES, 0 = off,
- * clamped to SB_MAX_LINES). Unusable value degrades to the default. */
+/* CRUFT_HISTORY: total depth in rows (default SB_DEFAULT_DEPTH, 0 =
+ * off, clamped to SB_DEPTH_MAX); CRUFT_SB_RAM: how many of those stay
+ * in the RAM ring (default SB_RAM_LINES). Deeper requests spill the
+ * older rows to the disk tier. Unusable values degrade to the
+ * defaults. */
 void sb_init(struct terminal_t *term)
 {
 	const char *env;
-	long n = SB_DEFAULT_LINES;
+	long total = SB_DEFAULT_DEPTH, ram = SB_RAM_LINES;
 
 	term->sb = (struct scrollback_t) {0};
+	term->sb.disk.fd = -1; /* zeroed struct must not read as stdin */
 
 	env = getenv("CRUFT_HISTORY");
 	if (env && *env) {
 		char *ep;
 
-		n = strtol(env, &ep, 10);
-		if (ep == env || n < 0)
-			n = SB_DEFAULT_LINES;
+		total = strtol(env, &ep, 10);
+		if (ep == env || total < 0)
+			total = SB_DEFAULT_DEPTH;
 	}
-	if (n > SB_MAX_LINES)
-		n = SB_MAX_LINES;
+	if (total > SB_DEPTH_MAX)
+		total = SB_DEPTH_MAX;
 
-	term->sb.cap = (unsigned)n;
+	env = getenv("CRUFT_SB_RAM");
+	if (env && *env) {
+		char *ep;
+
+		ram = strtol(env, &ep, 10);
+		if (ep == env || ram < 1)
+			ram = SB_RAM_LINES;
+	}
+	if (ram > SB_DEPTH_MAX)
+		ram = SB_DEPTH_MAX;
+
+	term->sb.cap = (unsigned)(total < ram ? total: ram);
 	if (term->sb.cap == 0)
 		return;
 
-	/* Bound-checked above to [0, SB_MAX_LINES]; the opt-in taint
+	/* Bound-checked above to [0, SB_DEPTH_MAX]; the opt-in taint
 	 * analyzer cannot see through strtol and would flag the size. */
 	term->sb.rows = (struct cell_t **) calloc(term->sb.cap, sizeof(*term->sb.rows)); /* NOLINT(clang-analyzer-optin.taint.TaintedAlloc) */
 	if (!term->sb.rows) {
 		fprintf(stderr, "cruft: scrollback: ring alloc failed, disabled\n");
 		term->sb.cap = 0;
+		return;
 	}
+	term->sb.disk.cap = (unsigned)total - term->sb.cap;
+}
+
+/* Rows in flight across both tiers (0 = nothing to browse). */
+unsigned sb_history_total(const struct terminal_t *term)
+{
+	return term->sb.count + term->sb.disk.count;
 }
 
 void sb_reset(struct terminal_t *term)
@@ -94,6 +117,7 @@ void sb_reset(struct terminal_t *term)
 	sb->count = sb->head = 0;
 	sb->pixmap_bytes = 0;
 	sb->view = 0;
+	sbdisk_detach(term); /* unlinks the session file */
 }
 
 void sb_die(struct terminal_t *term)
@@ -104,22 +128,32 @@ void sb_die(struct terminal_t *term)
 	term->sb.cap = 0;
 }
 
-/* Copy a live row into the ring (evicting the oldest when full) and
- * take ownership of any sixel payloads it carried. */
+/* Copy a live row into the RAM ring (evicting the oldest, which spills
+ * to disk when the tier is armed) and take ownership of any sixel
+ * payloads it carried. While the viewer sits on stored rows, a push
+ * increments sb.view so the browsed row stays in place. */
 void sb_feed_line(struct terminal_t *term, const struct cell_t *src)
 {
 	struct scrollback_t *sb = &term->sb;
 	const size_t cell_b = cell_pixmap_bytes();
 	struct cell_t *row;
-	unsigned slot;
+	unsigned slot, total0;
+	bool pin;
 
 	if (sb->cap == 0 || !sb->rows || term->cols < 1)
 		return;
+
+	total0 = sb_history_total(term);
+	pin = sb->view >= (unsigned)term->lines && sb->view <= total0;
 
 	slot = sb->head;
 	if (sb->count == sb->cap) {
 		struct cell_t *old = sb->rows[slot];
 
+		/* The evicted row is the disk tier's intake: hand it over
+		 * BEFORE freeing (store deep-copies the pixmap payloads). */
+		if (sb->disk.cap)
+			sbdisk_store(term, old);
 		for (int x = 0; x < term->cols; x++)
 			if (old[x].has_pixmap)
 				sb->pixmap_bytes -= cell_b;
@@ -151,23 +185,32 @@ void sb_feed_line(struct terminal_t *term, const struct cell_t *src)
 	sb->rows[slot] = row;
 	sb->head = (slot + 1) % sb->cap;
 	sb->count++;
-	if (sb->view > sb->count)
-		sb->view = sb->count;
+	if (pin)
+		sb->view++;
+	/* Compaction can shed the oldest rows out from under the viewer. */
+	if (sb->view > sb_history_total(term))
+		sb->view = sb_history_total(term);
 	sb_shrink_pixmaps(term);
 }
 
-/* Resolve logical line (0 = top of the rendered window) to a row: the
- * bottom lines - view lines are the live primary, the rest is history. */
-const struct cell_t *sb_view_row(const struct terminal_t *term, int line)
+/* Resolve logical line (0 = top of the rendered window) to a row.
+ * Distances from the live tail under lines land in the live primary;
+ * the next sb.count distances walk the RAM ring (newest first); deeper
+ * distances pread the disk tier. Never returns NULL: a disk read
+ * failure hands out a blank row and degrades the tier. */
+const struct cell_t *sb_view_row(struct terminal_t *term, int line)
 {
 	const struct scrollback_t *sb = &term->sb;
 	unsigned d = sb->view + (term->lines - 1 - line);
 
 	/* Live rows come from whichever screen is active (view is forced to
-	 * 0 on the alt screen, so the history arm is unreachable there). */
+	 * 0 on the alt screen, so the history arms are unreachable there). */
 	if ((int)d < term->lines)
 		return term->scr[term->active].cells[term->lines - 1 - d];
-	return sb->rows[(sb->head + sb->cap - 1 - (d - term->lines)) % sb->cap];
+	d -= term->lines;
+	if (d < sb->count)
+		return sb->rows[(sb->head + sb->cap - 1 - d) % sb->cap];
+	return sbdisk_fetch(term, d - sb->count);
 }
 
 /*
@@ -200,13 +243,14 @@ static const enum sb_action nav_actions[] = {
 static void sb_apply(struct terminal_t *term, enum sb_action action)
 {
 	struct scrollback_t *sb = &term->sb;
+	unsigned total = sb_history_total(term);
 	unsigned half = term->lines / 2;
 
 	if (half < 1)
 		half = 1;
 	switch (action) {
 	case SB_UP:
-		if (sb->view < sb->count)
+		if (sb->view < total)
 			sb->view++;
 		break;
 	case SB_DOWN:
@@ -214,13 +258,13 @@ static void sb_apply(struct terminal_t *term, enum sb_action action)
 			sb->view--;
 		break;
 	case SB_PAGE_UP:
-		sb->view = (sb->view + half < sb->count) ? sb->view + half: sb->count;
+		sb->view = (sb->view + half < total) ? sb->view + half: total;
 		break;
 	case SB_PAGE_DOWN:
 		sb->view = (sb->view > half) ? sb->view - half: 0;
 		break;
 	case SB_TOP:
-		sb->view = sb->count;
+		sb->view = total;
 		break;
 	case SB_BOTTOM:
 		sb->view = 0;
@@ -236,7 +280,7 @@ int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n)
 
 	if (!vt_active || term->active != 0)
 		return 0; /* alt screen: the app owns every key */
-	if (term->sb.cap == 0 || term->sb.count == 0)
+	if (sb_history_total(term) == 0)
 		return 0; /* nothing stored: Meta-nav passes through */
 
 	while (consumed < (unsigned)n) {

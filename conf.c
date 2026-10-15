@@ -23,10 +23,13 @@ static void conf_warn(char *fmt, ...)
 {
 	va_list ap;
 
-	/* fputs, not fprintf: a variadic call wedged between va_start and
-	 * vfprintf trips the analyzer's valist check (false positive). */
+	/* The analyzer's valist check misfires on this straight-line
+	 * va_start/vfprintf pair (clang 18.1; the identical body in
+	 * util.h's logging passes the same lane) - suppress the false
+	 * positive rather than bend correct code around it. */
 	fputs(">>WARN<<\t", stderr);
 	va_start(ap, fmt);
+	/* NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) */
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);
 }

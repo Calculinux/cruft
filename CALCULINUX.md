@@ -42,28 +42,50 @@ covers the lifecycle.
 
 ## Scrollback
 
-A ring of **copied** rows fed by `scroll()` only when a *full-primary*
-scroll-up would erase them: sub-region scrolls (editor panes) and the
-alt screen (wiped on entry anyway) never feed history. The ring owns
-its rows — cell structs and sixel pixmaps are deep-copied at drain
-time (`cell_pixmap_dup`), so the screen's subsequent erase cannot alias
-or corrupt stored content.
+History is **two tiers** over the rows drained from the primary.
+Feeding: `scroll()` hands a row to `sb_feed_line()` only when a
+*full-primary* scroll-up would erase it — sub-region scrolls (editor
+panes) and the alt screen (wiped on entry anyway) never feed history.
+Every tier OWNS its rows: cell structs and sixel pixmaps are
+deep-copied at drain time (`cell_pixmap_dup`), so the screen's
+subsequent erase cannot alias or corrupt stored content.
 
-- Depth: `CRUFT_HISTORY` rows (default 96, clamp 1024, 0 = off).
-  Rows are allocated lazily as they are stored, so an idle session pays
-  only for the pointer array (< 1 KiB at the default). Worst case at
-  6x12/53 cols: ~1.25 KiB per stored row, ~123 KiB when the ring is
-  full; valgrind-clean, within the 1536/4096 kB RSS budgets.
-- Sixel budget: the ring carries at most 64 KiB of pixmap payload
+- RAM tier (`scrollback.c`): a ring of the newest `min(depth,
+  CRUFT_SB_RAM)` rows (defaults: 96 / 512). Rows are allocated lazily
+  as they are stored, so an idle session pays only for the pointer
+  array (< 1 KiB at the default). Worst case at 6x12/53 cols:
+  ~1.25 KiB per stored row, ~640 KiB at the 512-row RAM cap; within
+  the 1536/4096 kB RSS budgets.
+- Disk tier (`sbdisk.c`): when `CRUFT_HISTORY` exceeds the RAM tier,
+  rows falling out of the ring spill to a session-scoped file in
+  /var/tmp (`mkstemp`, 0600, unlinked on exit/reset). One
+  variable-length record per row — packed cells (fg, bg, attr, width,
+  bitmap) plus a sixel table, capped at 32 KiB of pixmaps per record
+  (near-all-art rows store as blank text). Glyph POINTERS are not
+  persistable, so records encode bitmaps and decode through an intern
+  table: a row in the small decoded-row cache shares one glyph block
+  per distinct (width, bitmap). An in-RAM dir of record offsets keeps
+  browsing O(1) (128 KiB at the 16384 ceiling, grown lazily). When the
+  file is full the oldest quarter is compacted away (rewrite burst,
+  amortized over a quarter-cap of rows). Any unreadable file degrades
+  the tier for the session — RAM keeps serving, the file is dropped.
+  Little-endian, versioned header, session-scoped (never adopted
+  across restarts).
+- Sixel budget: the RAM ring carries at most 64 KiB of pixmap payload
   (`SB_PIXMAP_CAP_KIB`); overflowing strips the oldest art first
   (those cells keep their glyph, usually the space).
+- Depth: `CRUFT_HISTORY` is the TOTAL across both tiers (default 96,
+  clamp 16384, 0 = off); `CRUFT_SB_RAM` sizes the RAM tier (default
+  512). Depths ≤ the RAM tier behave exactly as the pure-RAM ring.
 - Viewport: `term->sb.view` counts stored rows lifted above the live
-  screen; `sb_view_row()` maps logical lines to live-or-stored rows.
-  While `view > 0` every refresh repaints every line (stored rows are
-  immutable; the live dirty flags index live rows, not logical ones).
-  The renderer anchors the grid left (the centred leftover moves
-  wholesale right, a one-time 1px shift at 6x12/320) and `fb_scrollbar`
-  draws the 2px track/thumb in the yielded strip. Fonts that divide
+  screen; `sb_view_row()` maps logical lines to live, RAM or disk
+  rows. While the window sits on stored rows, a new push increments
+  `view` so the browsed row stays in place. While `view > 0` every
+  refresh repaints every line (stored rows are immutable; the live
+  dirty flags index live rows, not logical ones). The renderer anchors
+  the grid left (the centred leftover moves wholesale right, a one-time
+  1px shift at 6x12/320) and `fb_scrollbar` draws the 2px track/thumb
+  in the yielded strip (sized with the total depth). Fonts that divide
   the width exactly have no strip and therefore no bar — the keys
   still work.
 - Keys (man page, KEYBOARD): only Meta-prefixed sequences are consumed

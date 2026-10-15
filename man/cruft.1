@@ -30,8 +30,10 @@ VM) is hidden; a missing or unsuitable status font disables the bar
 entirely and the grid reclaims the full screen.
 .PP
 Lines that scroll off the top of the main screen are kept in a
-scrollback ring (see
-.BR CRUFT_HISTORY ).
+scrollback buffer (see
+.BR CRUFT_HISTORY ): the newest rows in RAM, and older ones in a
+session file when the requested depth exceeds the RAM tier (
+.BR CRUFT_SB_RAM ).
 While any history is stored, a thin scrollbar in the right edge of the
 grid shows the current position; full-screen programs run on the
 alternate screen and never pollute the history.
@@ -90,10 +92,25 @@ or
 to disable the bar. Unknown names are ignored with a warning.
 .TP
 .B CRUFT_HISTORY
-Scrollback depth in rows (default 96, capped at 1024).
-0 disables the ring and the scrollbar. Stored rows carry copied cell
-contents; sixel pixmaps in history are deep-copied up to a 64 KiB
-budget, oldest art degrading to blank beyond it.
+Total scrollback depth in rows, across the RAM tier and the disk
+overflow (default 96, capped at 16384).
+0 disables history and the scrollbar. Rows deeper than the RAM tier
+(default 512, see
+.BR CRUFT_SB_RAM )
+spill to a session file in /var/tmp (created 0600, removed on exit);
+a depth at or below the RAM tier keeps history fully in memory.
+Stored rows carry copied cell contents; sixel pixmaps are kept per
+row up to a 32 KiB budget on disk (a row that is almost all art
+degrades to blank text) and in the RAM ring up to a 64 KiB total
+budget, oldest art degrading to blank beyond it. A file that becomes
+unreadable (crash, damage) silently disables the disk tier for the
+session; the RAM tier and the screen keep working.
+.TP
+.B CRUFT_SB_RAM
+Rows of scrollback kept in the RAM tier (default 512, 1 to 16384).
+Only depths above this value in
+.B CRUFT_HISTORY
+are stored on disk.
 .TP
 .B CRUFT_SB_12H
 Set to 1 for a 12-hour clock (\fIH:MMam/pm\fP); the default is

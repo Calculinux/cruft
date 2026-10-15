@@ -22,6 +22,16 @@ enum {
 	REPLACEMENT_CHAR = 0x003F,
 };
 
+/* Scrollback: total depth (CRUFT_HISTORY), RAM tier depth
+ * (CRUFT_SB_RAM), and per-record sixel payload kept on disk. */
+enum {
+	SB_DEFAULT_DEPTH    = 96,      /* rows, unless CRUFT_HISTORY */
+	SB_RAM_LINES        = 512,     /* rows kept in RAM (spills past) */
+	SB_DEPTH_MAX        = 16384,   /* CRUFT_HISTORY ceiling */
+	SB_RECORD_PIXMAP_KB = 32,      /* sixel bytes kept per disk row */
+	SB_PIXMAP_CAP_KIB   = 64,      /* sixel payload the RAM ring retains */
+};
+
 #ifndef CRUFT_NO_GLOBALS
 const char *term_name = "cruft-256color";
 

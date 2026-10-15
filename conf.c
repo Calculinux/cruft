@@ -23,7 +23,9 @@ static void conf_warn(char *fmt, ...)
 {
 	va_list ap;
 
-	fprintf(stderr, ">>WARN<<\t");
+	/* fputs, not fprintf: a variadic call wedged between va_start and
+	 * vfprintf trips the analyzer's valist check (false positive). */
+	fputs(">>WARN<<\t", stderr);
 	va_start(ap, fmt);
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);

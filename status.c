@@ -7,13 +7,12 @@
  * second and repaints the 8px strip only when its content or the
  * palette changes. Layout (right side right-anchored):
  *
- *   [wifi stair]     [HH:MM]     [meter][NN%]  [battery][NN%][arrow]
+ *                           [HH:MM]     [wifi stair]  [battery][NN%][arrow]
  *
  * Sources, all optional (a missing source hides its segment):
- *   wifi       /sys/class/net/<if>/operstate (phy80211 stations only)
- *   signal     nl80211 station dump (GET_STATION | NLM_F_DUMP), dBm
+ *   wifi       /sys/class/net/<if>/operstate (phy80211 devices only)
+ *   signal     /proc/net/wireless Level column, dBm
  *   battery    /sys/class/power_supply/<ps>/{capacity,status}
- *   brightness /sys/class/backlight/<dev>/{brightness,max_brightness}
  */
 #define CRUFT_NO_GLOBALS
 /* util.h, like conf.h, defines its helpers; exactly one TU (cruft.c) may
@@ -43,18 +42,6 @@ int my_ceil(int val, int div);
 #include <dirent.h>
 #include <sys/stat.h>
 
-#ifdef __linux__
-#include <net/if.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
-#include <sys/time.h>
-#include <linux/genetlink.h>
-#include <linux/netlink.h>
-#include <linux/nl80211.h>
-#include <linux/rtnetlink.h>
-#define SB_HAVE_NL80211 1
-#endif
-
 #define SB_PATHLEN 512
 #define SB_BUFLEN  64
 /* dirents are up to 255 chars; room for NUL */
@@ -75,13 +62,11 @@ enum {
 	SEG_TIME = 1 << 0,
 	SEG_WIFI = 1 << 1,
 	SEG_BATT = 1 << 2,
-	SEG_BRIG = 1 << 3,
 };
 
 /* Test seams: sysfs roots */
 const char *sb_net_root = "/sys/class/net";
 const char *sb_ps_root  = "/sys/class/power_supply";
-const char *sb_bkl_root = "/sys/class/backlight";
 
 /* Icons (all present in miniwi); sb_ascii substitutes text labels when a
  * swapped-in 4x8 font lacks them. */
@@ -107,7 +92,6 @@ static int sb_prev_ok;
 static struct sb_draw sb_prev;
 static char sb_wifi_ifn[SB_NAMELEN];
 static char sb_batt_ent[SB_NAMELEN];
-static char sb_bkl_dev[SB_NAMELEN];
 
 /* ------------------------------------------------------------------ */
 /* small file helpers (quiet: absence is a normal, unlogged state)     */
@@ -222,18 +206,6 @@ static int pick_batt(const char *n, void *ctx)
 	return 1;
 }
 
-static int pick_bkl(const char *n, void *ctx)
-{
-	char p[SB_PATHLEN];
-	long mx;
-
-	snprintf(p, sizeof p, "%s/%.255s/max_brightness", (const char *)ctx, n);
-	if (!sb_read_i(p, &mx) || mx <= 0)
-		return 0;
-	snprintf(p, sizeof p, "%s/%.255s/brightness", (const char *)ctx, n);
-	return sb_stat_ok(p);
-}
-
 static void sb_retain(const char *root, char *slot, const char *probe)
 {
 	char p[SB_PATHLEN];
@@ -246,251 +218,64 @@ static void sb_retain(const char *root, char *slot, const char *probe)
 }
 
 /* ----------------------------------------------------- */
-/* nl80211: own-station signal in dBm (0 = not found)    */
+/* wifi signal: /proc/net/wireless Level column, in dBm  */
 /* ----------------------------------------------------- */
 
-#ifdef SB_HAVE_NL80211
-static int sb_genl_family_id; /* cached nl80211 family id */
+/* TODO(signal): /proc/net/wireless is the pragmatic source on the target
+ * stack (6.1.99-rockchip + vendorized rtw89): its ctrl family refuses
+ * by-name genl resolution (ENOENT), so the nl80211 GET_STATION path that
+ * used to live here could never retrieve a family id there, while the
+ * proc Level column is live and tracks the AP distance well. Revisit on
+ * a newer kernel: GET_STATION|NLM_F_DUMP with the nested
+ * NL80211_ATTR_STA_INFO/NL80211_STA_INFO_SIGNAL attributes gives a
+ * per-BSS dBm reading and outlives drivers that stop populating the WEXT
+ * compat proc; resolve the family via CTRL_CMD_GETFAMILY, genl version 2. */
 
-static const void *nla_find(const void *attrs, int len, uint16_t type)
+/* Level column of one /proc/net/wireless line. The kernel field-formats
+ * the interface name (six-char right-justified), so rows look like
+ * " wlan0: 0000   49.  -61.  -256  ..."; leading/trivial padding is
+ * tolerated. Fields after the colon: status, quality, Level in dBm,
+ * noise. -999 when the line is not for our interface or the Level is
+ * absent/invalid. Pure; golden-tested. */
+int sb_wireless_level(const char *line, const char *ifname)
 {
-	const struct rtattr *rta = attrs;
+	size_t n = strlen(ifname);
+	const char *s, *c;
+	double lvl;
 
-	while (RTA_OK(rta, len)) {
-		if (rta->rta_type == type)
-			return RTA_DATA(rta);
-		rta = RTA_NEXT(rta, len);
-	}
-	return NULL;
-}
-
-/* 8 KiB: the nl80211 NEWFAMILY reply carries the full ops and
- * multicast-group lists (several KB), so a small buffer truncates it. */
-#define SB_NL_BUFSZ 8192
-
-static int sb_nl_family_id(void)
-{
-	int fd, seq = 1, fam = -1, bytes;
-	union { struct nlmsghdr nh; char buf[SB_NL_BUFSZ]; } req, res;
-	struct genlmsghdr *gh;
-	struct iovec iov = { req.buf, 0 };
-	struct msghdr mh = {
-		.msg_iov = &iov,
-		.msg_iovlen = 1,
-	};
-	struct sockaddr_nl to = { .nl_family = AF_NETLINK };
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 200 * 1000 };
-
-	if (sb_genl_family_id > 0)
-		return sb_genl_family_id;
-
-	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
-	if (fd < 0)
-		return -1;
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-	if (bind(fd, (struct sockaddr *)&to, sizeof to)) {
-		close(fd);
-		return -1;
-	}
-
-	req.nh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN +
-		RTA_LENGTH(sizeof("nl80211")));
-	req.nh.nlmsg_type = GENL_ID_CTRL;
-	req.nh.nlmsg_flags = NLM_F_REQUEST;
-	req.nh.nlmsg_seq = seq;
-	gh = (struct genlmsghdr *)NLMSG_DATA(&req.nh);
-	gh->cmd = 0;
-	gh->version = 1;
-	gh->reserved = 0;
-	{
-		struct rtattr *a = (struct rtattr *)((char *)gh + GENL_HDRLEN);
-
-		a->rta_type = CTRL_ATTR_FAMILY_NAME;
-		a->rta_len = RTA_LENGTH(sizeof("nl80211"));
-		memcpy(RTA_DATA(a), "nl80211", sizeof("nl80211"));
-	}
-
-	iov.iov_len = NLMSG_ALIGN(req.nh.nlmsg_len);
-	mh.msg_name = &to;
-	mh.msg_namelen = sizeof to;
-	if (sendmsg(fd, &mh, 0) < 0)
-		goto out;
-
-	do {
-		iov.iov_base = res.buf;
-		iov.iov_len = sizeof res.buf;
-		bytes = recvmsg(fd, &mh, 0);
-		if (bytes <= 0)
-			break;
-		for (struct nlmsghdr *nh = (struct nlmsghdr *)res.buf; NLMSG_OK(nh, (size_t)bytes);
-		     nh = NLMSG_NEXT(nh, bytes)) {
-			const void *data = NULL;
-
-			if (nh->nlmsg_type == NLMSG_ERROR) {
-				fam = -1;
-				goto out;
-			}
-			if (nh->nlmsg_type == NLMSG_DONE)
-				goto out;
-			/* genl: attributes follow the 4-byte genlmsghdr;
-			 * the resolve reply is a single message, so stop
-			 * after it */
-			if (nh->nlmsg_len >= NLMSG_HDRLEN + GENL_HDRLEN)
-				data = nla_find((const uint8_t *)NLMSG_DATA(nh)
-						+ GENL_HDRLEN,
-					(int)nh->nlmsg_len
-						- NLMSG_HDRLEN - GENL_HDRLEN,
-					CTRL_ATTR_FAMILY_ID);
-			if (data)
-				fam = (int)(*(const uint16_t *)data);
-			goto out;
-		}
-	} while (bytes > 0);
-
-out:
-	close(fd);
-	if (fam > 0)
-		sb_genl_family_id = fam;
-	return fam;
-}
-
-/* nested attribute walker returning the rtattr (length visible) */
-static const struct rtattr *nla_find_attr(const void *attrs, int len,
-					  uint16_t type)
-{
-	const struct rtattr *rta = attrs;
-
-	while (RTA_OK(rta, len)) {
-		if (rta->rta_type == type)
-			return rta;
-		rta = RTA_NEXT(rta, len);
-	}
-	return NULL;
-}
-
-/* Own-station signal in dBm from one station message: the canonical
- * nested NL80211_ATTR_STA_INFO/NL80211_STA_INFO_SIGNAL attribute, or the
- * deprecated top-level NL80211_ATTR_SIGNAL on older uapi. */
-static int sta_signal(const void *attrs, int len)
-{
-	const struct rtattr *a;
-
-	a = nla_find_attr(attrs, len, NL80211_ATTR_STA_INFO);
-	if (a && RTA_PAYLOAD(a) > 0) {
-		const struct rtattr *s = nla_find_attr(RTA_DATA(a),
-			RTA_PAYLOAD(a), NL80211_STA_INFO_SIGNAL);
-
-		if (s && RTA_PAYLOAD(s) >= 1)
-			return (int)(signed char)((const uint8_t *)RTA_DATA(s))[0];
-	}
-#ifdef NL80211_ATTR_SIGNAL
-	a = nla_find_attr(attrs, len, NL80211_ATTR_SIGNAL);
-	if (a && RTA_PAYLOAD(a) >= 1)
-		return (int)(signed char)((const uint8_t *)RTA_DATA(a))[0];
-#endif
-	return -999;
-}
-
-static int sb_nl_rssi(const char *ifname)
-{
-	int fd, seq = 2, bytes, rssi = -999;
-	unsigned int ifi;
-	int fam;
-	union { struct nlmsghdr nh; char buf[8192]; } req, res;
-	struct genlmsghdr *gh;
-	struct iovec iov = { req.buf, 0 };
-	struct msghdr mh = {
-		.msg_iov = &iov,
-		.msg_iovlen = 1,
-	};
-	struct sockaddr_nl to = { .nl_family = AF_NETLINK };
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 200 * 1000 };
-
-	ifi = if_nametoindex(ifname);
-	fam = sb_nl_family_id();
-	if (!ifi || fam < 0)
+	s = line;
+	while (*s == ' ')
+		s++;
+	if (strncmp(s, ifname, n) != 0)
 		return -999;
-
-	fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
-	if (fd < 0)
+	s += n;
+	while (*s == ' ')
+		s++;
+	if (*s != ':')
 		return -999;
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-	if (bind(fd, (struct sockaddr *)&to, sizeof to)) {
-		close(fd);
+	c = s + 1;
+	if (sscanf(c, " %*s %*s %lf", &lvl) != 1)
 		return -999;
-	}
-
-	req.nh.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN + RTA_LENGTH(4));
-	req.nh.nlmsg_type = (uint16_t)fam;
-	req.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-	req.nh.nlmsg_seq = seq;
-	gh = (struct genlmsghdr *)NLMSG_DATA(&req.nh);
-	gh->cmd = NL80211_CMD_GET_STATION; /* dump requested via NLM_F_DUMP */
-	gh->version = 1; /* nl80211 genl family version */
-	gh->reserved = 0;
-	{
-		struct rtattr *a = (struct rtattr *)((char *)gh + GENL_HDRLEN);
-
-		a->rta_type = NL80211_ATTR_IFINDEX;
-		a->rta_len = RTA_LENGTH(4);
-		memcpy(RTA_DATA(a), &ifi, 4);
-	}
-
-	iov.iov_len = NLMSG_ALIGN(req.nh.nlmsg_len);
-	mh.msg_name = &to;
-	mh.msg_namelen = sizeof to;
-	if (sendmsg(fd, &mh, 0) < 0)
-		goto out;
-
-	do {
-		iov.iov_base = res.buf;
-		iov.iov_len = sizeof res.buf;
-		bytes = recvmsg(fd, &mh, 0);
-		if (bytes <= 0)
-			break;
-		for (struct nlmsghdr *nh = (struct nlmsghdr *)res.buf; NLMSG_OK(nh, (size_t)bytes);
-		     nh = NLMSG_NEXT(nh, bytes)) {
-			if (nh->nlmsg_type == NLMSG_DONE)
-				goto out;
-			/* drivers rejecting the dump (e.g. -EOPNOTSUPP) send an
-			 * error and no NLMSG_DONE; bail instead of blocking on
-			 * the 200 ms recv timeout for the remainder of the dump */
-			if (nh->nlmsg_type == NLMSG_ERROR)
-				goto out;
-			/* dumped station replies: match the family id and
-			 * the +1 convention both netlink vintages use;
-			 * sta_signal() only answers on real signal attrs */
-			if (nh->nlmsg_type == (uint16_t)fam
-			    || nh->nlmsg_type == (uint16_t)(fam + 1)) {
-				int v = -999;
-
-				/* genl: attributes follow the 4-byte
-				 * genlmsghdr */
-				if (nh->nlmsg_len >= NLMSG_HDRLEN + GENL_HDRLEN)
-					v = sta_signal((const uint8_t *)NLMSG_DATA(nh)
-							+ GENL_HDRLEN,
-						(int)nh->nlmsg_len
-							- NLMSG_HDRLEN - GENL_HDRLEN);
-
-				if (v > -900) {
-					rssi = v;
-					goto out;
-				}
-			}
-		}
-	} while (bytes > 0);
-
-out:
-	close(fd);
-	return rssi;
+	if (lvl >= -1 || lvl < -128)
+		return -999;
+	return (int)lvl;
 }
-#else /* !__linux__ */
-static int sb_nl_rssi(const char *ifname)
+
+/* Own-station signal in dBm (-999 when absent). One tiny read per
+ * poll; no sockets. */
+static int sb_proc_rssi(const char *ifname)
 {
-	(void)ifname;
-	return -999;
+	FILE *fp = fopen("/proc/net/wireless", "r");
+	char line[128];
+	int v = -999;
+
+	if (!fp)
+		return -999;
+	while (v == -999 && fgets(line, (int)sizeof line, fp))
+		v = sb_wireless_level(line, ifname);
+	fclose(fp);
+	return v;
 }
-#endif /* SB_HAVE_NL80211 */
 
 /* ---------------------------------------------------------- */
 /* polled state                                                */
@@ -502,7 +287,6 @@ void statusbar_poll_now(struct sb_state *st, time_t now)
 	st->now  = now;
 	st->wifi = -1;
 	st->battery = -1;
-	st->brightness = -1;
 
 	if (sb_seg & SEG_WIFI) {
 		char p[SB_PATHLEN], b[32] = "";
@@ -527,8 +311,8 @@ void statusbar_poll_now(struct sb_state *st, time_t now)
 				 * "down"/"unknown" = not associated */
 				if (strcmp(b, "up") == 0
 				    || strcmp(b, "carrier") == 0) {
-					lvl = sb_rf_level(sb_nl_rssi(sb_wifi_ifn));
-					st->wifi = lvl ? lvl: 1; /* no rssi: weakest */
+					lvl = sb_rf_level(sb_proc_rssi(sb_wifi_ifn));
+					st->wifi = lvl ? lvl: 1; /* no reading: weakest */
 				} else {
 					st->wifi = 0;
 				}
@@ -571,36 +355,6 @@ void statusbar_poll_now(struct sb_state *st, time_t now)
 		}
 	}
 
-	if (sb_seg & SEG_BRIG) {
-		char p[SB_PATHLEN], q[SB_PATHLEN];
-		long bri, mx;
-
-		if (!sb_bkl_dev[0]) {
-			const char *n = sb_first_match(sb_bkl_root, pick_bkl,
-				(void *)sb_bkl_root);
-			if (n)
-				snprintf(sb_bkl_dev, sizeof sb_bkl_dev,
-					 "%.255s", n);
-		}
-		if (sb_bkl_dev[0]) {
-			sb_retain(sb_bkl_root, sb_bkl_dev, "brightness");
-			if (sb_bkl_dev[0]) {
-				snprintf(p, sizeof p, "%s/%s/brightness",
-					sb_bkl_root, sb_bkl_dev);
-				snprintf(q, sizeof q, "%s/%s/max_brightness",
-					sb_bkl_root, sb_bkl_dev);
-				if (sb_read_i(p, &bri) && sb_read_i(q, &mx)
-				    && mx > 0) {
-					if (bri < 0)
-						bri = 0;
-					st->brightness =
-						(int)((bri * 100 + mx / 2) / mx);
-					if (st->brightness > 100)
-						st->brightness = 100;
-				}
-			}
-		}
-	}
 }
 
 /* ------------------------------------------------------------- */
@@ -624,7 +378,7 @@ uint8_t sb_parse_segments(const char *spec, int *unknown)
 			*p = (char)(*p + 'a' - 'A');
 	}
 	if (strcmp(b, "all") == 0)
-		return (uint8_t)(SEG_TIME | SEG_WIFI | SEG_BATT | SEG_BRIG);
+		return (uint8_t)(SEG_TIME | SEG_WIFI | SEG_BATT);
 	if (strcmp(b, "none") == 0 || strcmp(b, "0") == 0)
 		return 0;
 	for (tok = strtok(b, ","); tok; tok = strtok(NULL, ",")) {
@@ -634,8 +388,6 @@ uint8_t sb_parse_segments(const char *spec, int *unknown)
 			mask |= SEG_WIFI;
 		else if (strcmp(tok, "battery") == 0)
 			mask |= SEG_BATT;
-		else if (strcmp(tok, "brightness") == 0)
-			mask |= SEG_BRIG;
 		else if (tok[0])
 			*unknown = 1;
 	}
@@ -719,31 +471,40 @@ void sb_build_items(const struct sb_state *st, uint8_t seg, int h12,
 	if (seg & SEG_TIME)
 		run_str(&d->center, num, SB_C_TXT);
 
-	/* right zone, left to right: brightness meter, then battery; the
-	 * battery keeps the right edge (arrow rightmost) per layout spec */
+	/* right zone, left to right: wifi stair (when present), then
+	 * battery; the battery keeps the right edge (arrow rightmost) */
 	{
-		int did_brig = 0;
+		int did_wifi = 0;
 
-		if ((seg & SEG_BRIG) && st->brightness >= 0) {
-			int lit = (st->brightness + 12) / 25; /* 0..4 */
+		if ((seg & SEG_WIFI) && st->wifi >= 0) {
+			static const uint32_t stair[4] = { I_W1, I_W2, I_W3,
+				I_W4 };
+			uint8_t lc = (st->wifi == 4) ? SB_C_GRN:
+				(st->wifi == 3) ? SB_C_YEL: SB_C_RED;
 
 			if (!ascii) {
-				for (int i = 0; i < 4; i++)
-					run_push(&d->right, I_F8,
-						i < lit ? SB_C_TXT: SB_C_OFF);
+				for (int c = 0; c < 4; c++)
+					run_push(&d->right, stair[c],
+						(st->wifi > 0 && c < st->wifi)
+							? lc: SB_C_OFF);
 			} else {
-				run_str(&d->right, "BRI", SB_C_TXT);
+				run_str(&d->right, "WIFI", SB_C_TXT);
 				run_sp(&d->right, 1);
+				if (st->wifi > 0) {
+					snprintf(num, sizeof num, "%d/4",
+						 st->wifi);
+					run_str(&d->right, num, SB_C_TXT);
+				} else {
+					run_str(&d->right, "off", SB_C_TXT);
+				}
 			}
-			snprintf(num, sizeof num, "%d%%", st->brightness);
-			run_str(&d->right, num, SB_C_TXT);
-			did_brig = 1;
+			did_wifi = 1;
 		}
 
 		if ((seg & SEG_BATT) && st->battery >= 0) {
 			uint8_t bc = sb_batt_color(st->battery);
 
-			if (did_brig)
+			if (did_wifi)
 				run_sp(&d->right, 2);
 			if (!ascii) {
 				/* 4 cells, each 0..1 full; fill in cell-hundredths
@@ -771,28 +532,6 @@ void sb_build_items(const struct sb_state *st, uint8_t seg, int h12,
 				ascii ? (st->charging ? '+': '-')
 				       : (st->charging ? I_UP: I_DOWN),
 				st->charging ? SB_C_YEL: SB_C_OFF);
-		}
-	}
-
-	if ((seg & SEG_WIFI) && st->wifi >= 0) {
-		static const uint32_t stair[4] = { I_W1, I_W2, I_W3, I_W4 };
-		uint8_t lc = (st->wifi == 4) ? SB_C_GRN:
-			(st->wifi == 3) ? SB_C_YEL: SB_C_RED;
-
-		if (!ascii) {
-			for (int c = 0; c < 4; c++)
-				run_push(&d->left, stair[c],
-					(st->wifi > 0 && c < st->wifi)
-						? lc: SB_C_OFF);
-		} else {
-			run_str(&d->left, "WIFI", SB_C_TXT);
-			run_sp(&d->left, 1);
-			if (st->wifi > 0) {
-				snprintf(num, sizeof num, "%d/4", st->wifi);
-				run_str(&d->left, num, SB_C_TXT);
-			} else {
-				run_str(&d->left, "off", SB_C_TXT);
-			}
 		}
 	}
 }
@@ -969,5 +708,4 @@ void statusbar_reset_discovery(void)
 {
 	sb_wifi_ifn[0] = '\0';
 	sb_batt_ent[0] = '\0';
-	sb_bkl_dev[0] = '\0';
 }

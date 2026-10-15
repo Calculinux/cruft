@@ -214,30 +214,37 @@ const struct cell_t *sb_view_row(struct terminal_t *term, int line)
 }
 
 /*
- * Navigation keys. Recognized only as a leading run of complete
- * sequences; anything not matching is forwarded to the shell verbatim.
- * Every binding is Meta-prefixed (ESC ESC ...) so bare arrows never
- * match and readline's history keys stay intact. Forms accepted after
- * the Meta: CSI (ESC [) and SS3 (ESC O), as emitted by either console
- * keymap. HOME/END jump to the oldest row / the live tail.
+ * Navigation keys, recognised as a leading run of complete sequences;
+ * anything not matching is forwarded to the program verbatim. The four
+ * gestures:
+ *   ESC [5~  ESC [6~    native page forms - on the PicoCalc the
+ *                       keyboard driver maps Shift+Up / Shift+Down
+ *                       to them
+ *   ESC [1;5H ESC [1;5F xterm Ctrl+Home / Ctrl+End - the PicoCalc's
+ *                       console keymap (picocalc.map) binds them to
+ *                       the Ctrl+Home / Ctrl+End key pairs
+ * Half-page steps; Home/End jump to the oldest row / the live tail.
+ * Bare arrows, and bare Home/End (ESC [1~ / ESC [4~), stay the
+ * program's. A page form that is the mere prefix of a longer
+ * parameterised sequence (ESC [5;<n>~, modified page keys of some
+ * terminals) is not matched. Interception happens on the main screen
+ * only; on the alt screen the program owns every key.
  */
 enum sb_action {
-	SB_UP, SB_DOWN, SB_PAGE_UP, SB_PAGE_DOWN, SB_TOP, SB_BOTTOM,
+	SB_PAGE_UP, SB_PAGE_DOWN, SB_TOP, SB_BOTTOM,
 };
 
-static const uint8_t nav_seqs[][6] = {
-	{ESC, ESC, '[', 'A'}, {ESC, ESC, 'O', 'A'},
-	{ESC, ESC, '[', 'B'}, {ESC, ESC, 'O', 'B'},
-	{ESC, ESC, '[', '5', '~'}, {ESC, ESC, 'O', '5', '~'},
-	{ESC, ESC, '[', '6', '~'}, {ESC, ESC, 'O', '6', '~'},
-	{ESC, ESC, '[', '7', '~'}, {ESC, ESC, 'O', '7', '~'},
-	{ESC, ESC, '[', '8', '~'}, {ESC, ESC, 'O', '8', '~'},
+static const uint8_t nav_seqs[][8] = {
+	{ESC, '[', '5', '~'},
+	{ESC, '[', '6', '~'},
+	{ESC, '[', '1', ';', '5', 'H'},
+	{ESC, '[', '1', ';', '5', 'F'},
 };
-static const int nav_seq_lens[] = {4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5};
+static const int nav_seq_lens[] = {
+	4, 4, 6, 6,
+};
 static const enum sb_action nav_actions[] = {
-	SB_UP, SB_UP, SB_DOWN, SB_DOWN,
-	SB_PAGE_UP, SB_PAGE_UP, SB_PAGE_DOWN, SB_PAGE_DOWN,
-	SB_TOP, SB_TOP, SB_BOTTOM, SB_BOTTOM,
+	SB_PAGE_UP, SB_PAGE_DOWN, SB_TOP, SB_BOTTOM,
 };
 
 static void sb_apply(struct terminal_t *term, enum sb_action action)
@@ -249,14 +256,6 @@ static void sb_apply(struct terminal_t *term, enum sb_action action)
 	if (half < 1)
 		half = 1;
 	switch (action) {
-	case SB_UP:
-		if (sb->view < total)
-			sb->view++;
-		break;
-	case SB_DOWN:
-		if (sb->view)
-			sb->view--;
-		break;
 	case SB_PAGE_UP:
 		sb->view = (sb->view + half < total) ? sb->view + half: total;
 		break;
@@ -281,10 +280,11 @@ int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n)
 	if (!vt_active || term->active != 0)
 		return 0; /* alt screen: the app owns every key */
 	if (sb_history_total(term) == 0)
-		return 0; /* nothing stored: Meta-nav passes through */
+		return 0; /* nothing stored: nav sequences pass through */
 
 	while (consumed < (unsigned)n) {
 		int matched = -1;
+		uint8_t c;
 
 		for (unsigned i = 0; i < sizeof(nav_seqs) / sizeof(nav_seqs[0]); i++) {
 			int len = nav_seq_lens[i];
@@ -296,6 +296,13 @@ int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n)
 			}
 		}
 		if (matched < 0)
+			break;
+		c = 0;
+		if (consumed + (unsigned)nav_seq_lens[matched] < (unsigned)n)
+			c = buf[consumed + (unsigned)nav_seq_lens[matched]];
+		/* parameter bytes follow: a longer (modified) sequence,
+		 * not our page key - let it through whole */
+		if (c == ';' || (c >= '0' && c <= '9'))
 			break;
 		sb_apply(term, nav_actions[matched]);
 		consumed += (unsigned)nav_seq_lens[matched];

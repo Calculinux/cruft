@@ -241,10 +241,11 @@ int main(int argc, char *const argv[])
 
 		if (FD_ISSET(STDIN_FILENO, &fds)) {
 			if ((size = read(STDIN_FILENO, buf, BUFSIZE)) > 0) {
-				/* Meta-nav keys at the front of the buffer steer
-				 * the scrollback view and are swallowed; the rest
-				 * (bare arrows among them) reaches the shell. Any
-				 * foreign byte snaps the view back to the live tail. */
+				/* Nav keys (page forms, Ctrl+Home/End) at the
+				 * front of the buffer steer the scrollback
+				 * view and are swallowed; the rest (bare arrows
+				 * among them) reaches the shell. Any foreign
+				 * byte snaps the view back to the live tail. */
 				unsigned view0 = term.sb.view;
 				int eaten = sb_consume_nav(&term, buf, (int)size);
 

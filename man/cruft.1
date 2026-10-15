@@ -32,19 +32,30 @@ grid shows the current position; full-screen programs run on the
 alternate screen and never pollute the history.
 .SH KEYBOARD
 .PP
-History navigation keys (all require the Meta/Alt modifier; the bare
-arrows remain readline's):
+History navigation:
 .RS
 .TP
-Meta-Up / Meta-Down
-one line deeper into / out of the history
+\fBPrior\fP (\fBESC [5~\fP)
+half a page deeper into the history
 .TP
-Meta-Prior / Meta-Next
-half a page (Prior: deeper; Next: towards the live screen)
+\fBNext\fP (\fBESC [6~\fP)
+half a page towards the live tail
 .TP
-Meta-Home / Meta-End
-oldest stored row / live tail
+\fBCtrl+Home\fP (\fBESC [1;5H\fP)
+the oldest stored row
+.TP
+\fBCtrl+End\fP (\fBESC [1;5F\fP)
+the live tail
 .RE
+.PP
+The page keys are native: on the PicoCalc the keyboard driver maps
+Shift+Up / Shift+Down to them. The Ctrl+Home / Ctrl+End sequences come
+from the shipped console keymap (picocalc.map); both halves of those
+pairs are free on this keyboard, whose Home / End are themselves the
+shifted Tab / Delete. Bare arrows, and bare Home / End, stay the
+program's. On the main screen cruft intercepts the four sequences
+before the foreground program sees them; full-screen programs run on
+the alternate screen and own every key.
 .PP
 Any other key while browsing scrolls back to the live tail and is
 delivered to the program. Sequences are matched only at the start of a

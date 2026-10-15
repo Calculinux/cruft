@@ -88,12 +88,14 @@ subsequent erase cannot alias or corrupt stored content.
   in the yielded strip (sized with the total depth). Fonts that divide
   the width exactly have no strip and therefore no bar — the keys
   still work.
-- Keys (man page, KEYBOARD): only Meta-prefixed sequences are consumed
-  (`ESC ESC [ A/B/5~/6~/7~/8~`, CSI and SS3 forms); bare arrows always
-  pass through so readline history stays intact, and any non-nav byte
-  snaps the view back to the live tail (mouseless console: typing
-  blind over stale history is the trap). In the alt screen every key
-  belongs to the app.
+- Keys (man page, KEYBOARD): only the native page forms (`ESC [5~` /
+  `ESC [6~` - Shift+Up / Shift+Down on the PicoCalc) and the
+  Ctrl+Home / Ctrl+End forms (`ESC [1;5H` / `ESC [1;5F`, bound in the
+  PicoCalc console keymap) are consumed; bare arrows, bare Home/End,
+  and other modifier forms always pass through so readline history
+  stays intact, and any non-nav byte snaps the view back to the live
+  tail (mouseless console: typing blind over stale history is the
+  trap). In the alt screen every key belongs to the app.
 - Hygiene: RIS clears the ring; DECALT entry forces `view = 0`;
   `drcs_clear_charset()` scrubs stored cells that referenced the freed
   DRCS table (address-range test, substitute glyph substituted — a

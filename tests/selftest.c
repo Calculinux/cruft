@@ -1354,19 +1354,22 @@ int main(void)
 
 	/* T: scrollback ring (scrollback.c): feeding rules (full-primary
 	 * scrolls only), copied-row ownership, eviction order, viewport
-	 * mapping, Meta-nav keys, RIS reset, pixmap payload cap. */
+	 * mapping, nav keys (native page forms), RIS reset,
+	 * pixmap payload cap. */
 	g_cell_w = 6;
 	g_cell_h = 12;
 	{
 		struct screen_t *tscr;
 		const struct glyph_t *qm = glyph_get(0x3f);
-		const uint8_t bare_up[]   = {ESC, '[', 'A'};
-		const uint8_t meta_up[]   = {ESC, ESC, '[', 'A'};
-		const uint8_t ss3_down[]  = {ESC, ESC, 'O', 'B'};
-		const uint8_t meta_pgup[] = {ESC, ESC, '[', '5', '~'};
-		const uint8_t meta_home[] = {ESC, ESC, '[', '7', '~'};
-		const uint8_t meta_end[]  = {ESC, ESC, '[', '8', '~'};
-		const uint8_t mixed[]     = {ESC, ESC, '[', 'A', 'x'};
+		const uint8_t bare_up[]     = {ESC, '[', 'A'};
+		const uint8_t shift_up[]    = {ESC, '[', '1', ';', '2', 'A'};
+		const uint8_t plain_pgup[]  = {ESC, '[', '5', '~'};
+		const uint8_t plain_pgdwn[] = {ESC, '[', '6', '~'};
+		const uint8_t param_pgup[]  = {ESC, '[', '5', ';', '2', '~'};
+		const uint8_t ctrl_home[]   = {ESC, '[', '1', ';', '5', 'H'};
+		const uint8_t ctrl_end[]    = {ESC, '[', '1', ';', '5', 'F'};
+		const uint8_t bare_home[]   = {ESC, '[', '1', '~'};
+		const uint8_t mixed[]       = {ESC, '[', '5', '~', 'x'};
 
 		setenv("CRUFT_HISTORY", "4", 1);
 		expect(term_init(&term, 96, 48), "T term_init 16x4");
@@ -1426,18 +1429,25 @@ int main(void)
 		expect(term.sb.count == 4, "T alt scroll does not drain");
 		leave_alt_screen(&term);
 
-		/* navigation keys: Meta-prefixed only, leading-run consumption */
+		/* navigation keys: the native page forms only (Shift+Up /
+		 * Shift+Down on the PicoCalc); every other form stays the
+		 * program's */
 		expect(sb_consume_nav(&term, bare_up, 3) == 0, "T bare arrow passes through");
-		expect(sb_consume_nav(&term, meta_up, 4) == 4 && term.sb.view == 1,
-			"T meta-up browses deeper");
-		expect(sb_consume_nav(&term, ss3_down, 4) == 4 && term.sb.view == 0,
-			"T SS3 down back to live");
-		expect(sb_consume_nav(&term, meta_pgup, 5) == 5 && term.sb.view == 2,
-			"T pgup steps a half page");
-		expect(sb_consume_nav(&term, meta_home, 5) == 5 && term.sb.view == 4,
-			"T home jumps to oldest");
-		expect(sb_consume_nav(&term, meta_end, 5) == 5 && term.sb.view == 0,
-			"T end jumps to live tail");
+		expect(sb_consume_nav(&term, shift_up, 7) == 0 && term.sb.view == 0,
+			"T shift-modified arrow passes through");
+		expect(sb_consume_nav(&term, plain_pgup, 4) == 4 && term.sb.view == 2,
+			"T prior pages a half screen deeper");
+		expect(sb_consume_nav(&term, plain_pgdwn, 4) == 4 && term.sb.view == 0,
+			"T next pages back to the live tail");
+		expect(sb_consume_nav(&term, ctrl_home, 6) == 6 && term.sb.view == 4,
+			"T ctrl-home jumps to the oldest row");
+		expect(sb_consume_nav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+			"T ctrl-end jumps to the live tail");
+		expect(sb_consume_nav(&term, bare_home, 3) == 0 && term.sb.view == 0,
+			"T bare home stays the program's");
+		term.sb.view = 2;
+		expect(sb_consume_nav(&term, param_pgup, 6) == 0 && term.sb.view == 0,
+			"T parameterised page form passes through and snaps");
 		term.sb.view = 3;
 		expect(sb_consume_nav(&term, mixed, 5) == 4 && term.sb.view == 0,
 			"T nav run then foreign byte snaps to live");
@@ -1452,7 +1462,7 @@ int main(void)
 		/* RIS resets the ring; an empty ring lets nav pass through */
 		reset(&term);
 		expect(term.sb.count == 0 && term.sb.view == 0, "T RIS empties ring");
-		expect(sb_consume_nav(&term, meta_up, 4) == 0,
+		expect(sb_consume_nav(&term, plain_pgup, 4) == 0,
 			"T no history: nav passes through");
 		/* tear down this generation before the re-init below, which
 		 * would otherwise leak the ring, matrices and esc buffer */
@@ -1581,8 +1591,9 @@ int main(void)
 	{
 		struct screen_t *uscr;
 		const struct glyph_t *qm = glyph_get(0x3f);
-		const uint8_t meta_home[] = {ESC, ESC, '[', '7', '~'};
-		const uint8_t meta_end[]  = {ESC, ESC, '[', '8', '~'};
+		const uint8_t plain_pgup[]  = {ESC, '[', '5', '~'};
+		const uint8_t plain_pgdwn[] = {ESC, '[', '6', '~'};
+		const uint8_t ctrl_end[]    = {ESC, '[', '1', ';', '5', 'F'};
 
 		/* total 10, RAM tier 3: the disk tier takes the other 7 */
 		setenv("CRUFT_HISTORY", "10", 1);
@@ -1655,11 +1666,14 @@ int main(void)
 
 			expect(alien, "U disk row is decoded, not borrowed");
 		}
-		/* nav spans both tiers */
-		expect(sb_consume_nav(&term, meta_end, 5) == 5 && term.sb.view == 0,
-			"U end jumps to live tail");
-		expect(sb_consume_nav(&term, meta_home, 5) == 5 && term.sb.view == 10,
-			"U home jumps to oldest (total depth)");
+		/* nav spans both tiers: page to the live tail, back to the
+		 * oldest row (five half-pages each way at total 10) */
+		for (int p = 0; p < 5; p++)
+			expect(sb_consume_nav(&term, plain_pgdwn, 4) == 4, "U pgdn consumed");
+		expect(term.sb.view == 0, "U paging reaches the live tail");
+		for (int p = 0; p < 5; p++)
+			expect(sb_consume_nav(&term, plain_pgup, 4) == 4, "U pgup consumed");
+		expect(term.sb.view == 10, "U paging reaches the oldest row");
 
 		/* push while browsing MID-history: the window stays put
 		 * (view pinned +1), the oldest row is compacted away */
@@ -1700,7 +1714,7 @@ int main(void)
 				"U tier degraded: RAM only");
 			expect(stat(dead, &(struct stat) { 0 }) != 0,
 				"U corrupt file unlinked");
-			expect(sb_consume_nav(&term, meta_end, 5) == 5
+			expect(sb_consume_nav(&term, ctrl_end, 6) == 6
 				&& term.sb.view == 0,
 				"U nav healthy after degrade");
 		}

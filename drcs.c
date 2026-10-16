@@ -30,9 +30,16 @@ struct glyph_t *drcs_ensure(struct terminal_t *term, int charset)
 
 void drcs_clear_charset(struct terminal_t *term, int charset)
 {
+	struct glyph_t *old;
+
 	if (!term || charset < 0 || charset >= DRCS_CHARSETS)
 		return;
-	free(term->drcs[charset]);
+	old = term->drcs[charset];
+	/* Scrollback rows may still reference this table; scrub them
+	 * before it goes under the allocator. */
+	if (old)
+		sb_scrub_freed_glyphs(term, old, GLYPHS_PER_CHARSET);
+	free(old);
 	term->drcs[charset] = NULL;
 }
 

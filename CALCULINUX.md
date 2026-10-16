@@ -40,6 +40,46 @@ full repaint of the side being switched to. Terminfo advertises
 the alt screen and stop smearing the main buffer. Selftest section S
 covers the lifecycle.
 
+## Scrollback
+
+A ring of **copied** rows fed by `scroll()` only when a *full-primary*
+scroll-up would erase them: sub-region scrolls (editor panes) and the
+alt screen (wiped on entry anyway) never feed history. The ring owns
+its rows — cell structs and sixel pixmaps are deep-copied at drain
+time (`cell_pixmap_dup`), so the screen's subsequent erase cannot alias
+or corrupt stored content.
+
+- Depth: `CRUFT_HISTORY` rows (default 96, clamp 1024, 0 = off).
+  Rows are allocated lazily as they are stored, so an idle session pays
+  only for the pointer array (< 1 KiB at the default). Worst case at
+  6x12/53 cols: ~1.25 KiB per stored row, ~123 KiB when the ring is
+  full; valgrind-clean, within the 1536/4096 kB RSS budgets.
+- Sixel budget: the ring carries at most 64 KiB of pixmap payload
+  (`SB_PIXMAP_CAP_KIB`); overflowing strips the oldest art first
+  (those cells keep their glyph, usually the space).
+- Viewport: `term->sb.view` counts stored rows lifted above the live
+  screen; `sb_view_row()` maps logical lines to live-or-stored rows.
+  While `view > 0` every refresh repaints every line (stored rows are
+  immutable; the live dirty flags index live rows, not logical ones).
+  The renderer anchors the grid left (the centred leftover moves
+  wholesale right, a one-time 1px shift at 6x12/320) and `fb_scrollbar`
+  draws the 2px track/thumb in the yielded strip. Fonts that divide
+  the width exactly have no strip and therefore no bar — the keys
+  still work.
+- Keys (man page, KEYBOARD): only Meta-prefixed sequences are consumed
+  (`ESC ESC [ A/B/5~/6~/7~/8~`, CSI and SS3 forms); bare arrows always
+  pass through so readline history stays intact, and any non-nav byte
+  snaps the view back to the live tail (mouseless console: typing
+  blind over stale history is the trap). In the alt screen every key
+  belongs to the app.
+- Hygiene: RIS clears the ring; DECALT entry forces `view = 0`;
+  `drcs_clear_charset()` scrubs stored cells that referenced the freed
+  DRCS table (address-range test, substitute glyph substituted — a
+  DRCS redefinition would otherwise leave the ring dangling).
+
+Selftest section T covers feeding rules, eviction order, viewport
+mapping, nav keys, the pixmap cap and the disabled mode.
+
 ## Status bar
 
 An 8px strip in the top margin, above the cell grid, rendered in the

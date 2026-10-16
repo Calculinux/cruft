@@ -24,13 +24,21 @@ can restart inactive VTs when changing `CONSOLE_FONT` (otherwise only tty1 updat
 
 Per-screen state (cell matrix, dirty flags, tabstops, scroll margins,
 cursor, wrap flag) lives in `struct screen_t scr[2]`; `active_screen()`
-(cruft.h) is the single routing point for all of it. Only `scr[0]`
-(primary) is allocated — `scr[1]` (alternate) is reserved and will be
-lazily allocated on first DECALT (`CSI ?1049h`) entry, which also toggles
-`term->active`. Screen-independent state (SGR/attribute, G0-G1, palettes,
-DRCS, sixel canvas) intentionally stays in `struct terminal_t`. Split is a
-pure refactor prep for DECALT + scrollback; selftest section R pins the
-routing.
+(cruft.h) is the single routing point for all of it. Screen-independent
+state (SGR/attribute, G0-G1, palettes, DRCS, sixel canvas) intentionally
+stays in `struct terminal_t`. Selftest section R pins the routing.
+
+DECALT (`CSI ?1049h/l`) is supported: `enter_alt_screen()` allocates
+`scr[1]` lazily on first entry and keeps it between excursions (~one
+cell matrix), wiping it on every entry (DECRLN). While the alt screen is
+resident the primary is never written to — only the cursor and scroll
+margins are parked in `term->alt_saved`. Doubled/mismatched 1049s are
+no-ops; RIS ends the residence and drops the matrix; each transition
+frees the sixel canvas (decode must not straddle a screen) and forces a
+full repaint of the side being switched to. Terminfo advertises
+`smcup`/`rmcup`, so ncurses full-screen apps (vim, htop, less, fzf) use
+the alt screen and stop smearing the main buffer. Selftest section S
+covers the lifecycle.
 
 ## Status bar
 

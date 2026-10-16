@@ -445,12 +445,13 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 	uint32_t pixel;
 	struct color_pair_t color_pair;
 	struct cell_t *cellp;
+	struct screen_t *scr = active_screen(term);
 	uint8_t *dest = fb_draw_dest(fb);
 
 	ox = grid_origin_x(term);
 	for (col = term->cols - 1; col >= 0; col--) {
 		/* target cell */
-		cellp = &term->cells[line][col];
+		cellp = &scr->cells[line][col];
 
 		/* draw sixel pixmap */
 		if (cellp->has_pixmap && cellp->pixmap) {
@@ -470,10 +471,10 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 		bit_base = (cellp->width == WIDE) ? CELL_WIDTH : 0;
 
 		/* check cursor position */
-		if ((term->mode & MODE_CURSOR && line == term->cursor.y)
-			&& (col == term->cursor.x
-			|| (cellp->width == WIDE && (col + 1) == term->cursor.x)
-			|| (cellp->width == NEXT_TO_WIDE && (col - 1) == term->cursor.x))) {
+		if ((term->mode & MODE_CURSOR && line == scr->cursor.y)
+			&& (col == scr->cursor.x
+			|| (cellp->width == WIDE && (col + 1) == scr->cursor.x)
+			|| (cellp->width == NEXT_TO_WIDE && (col - 1) == scr->cursor.x))) {
 			color_pair.fg = DEFAULT_BG;
 			color_pair.bg = (!vt_active && BACKGROUND_DRAW) ? PASSIVE_CURSOR_COLOR: ACTIVE_CURSOR_COLOR;
 		}
@@ -523,11 +524,13 @@ static inline void draw_line(struct framebuffer_t *fb, struct terminal_t *term, 
 		(maybe we can use this by using libdrm) */
 	/* TODO: vertical synchronizing */
 
-	term->line_dirty[line] = ((term->mode & MODE_CURSOR) && term->cursor.y == line) ? true: false;
+	scr->line_dirty[line] = ((term->mode & MODE_CURSOR) && scr->cursor.y == line) ? true: false;
 }
 
 void refresh(struct framebuffer_t *fb, struct terminal_t *term)
 {
+	struct screen_t *scr = active_screen(term);
+
 	if (term->palette_modified) {
 		term->palette_modified = false;
 		for (int i = 0; i < COLORS; i++)
@@ -536,14 +539,14 @@ void refresh(struct framebuffer_t *fb, struct terminal_t *term)
 	}
 
 	if (term->mode & MODE_CURSOR)
-		term->line_dirty[term->cursor.y] = true;
+		scr->line_dirty[scr->cursor.y] = true;
 
 	/* Edge strips the grid never covers (left/right/bottom margins; the
 	 * top strip is the status bar's when it is on). */
 	fb_paint_margin(fb, term);
 
 	for (int line = 0; line < term->lines; line++) {
-		if (term->line_dirty[line]) {
+		if (scr->line_dirty[line]) {
 			draw_line(fb, term, line);
 		}
 	}

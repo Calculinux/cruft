@@ -172,21 +172,22 @@ static int write_tiny_font(const char *path)
 
 static void free_term_cells(struct terminal_t *term)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, j;
 
-	if (!term->cells)
+	if (!scr->cells)
 		return;
 	for (i = 0; i < term->lines; i++) {
-		if (term->cells[i]) {
+		if (scr->cells[i]) {
 			for (j = 0; j < term->cols; j++)
-				cell_pixmap_clear(&term->cells[i][j]);
-			free(term->cells[i]);
+				cell_pixmap_clear(&scr->cells[i][j]);
+			free(scr->cells[i]);
 		}
 	}
-	free(term->cells);
-	term->cells = NULL;
-	free(term->line_dirty);
-	term->line_dirty = NULL;
+	free(scr->cells);
+	scr->cells = NULL;
+	free(scr->line_dirty);
+	scr->line_dirty = NULL;
 }
 
 /* Build a tiny CRUFTFN1 with space, '?' (row0 = bits 0-4) and U+3000 at 6x12.
@@ -342,6 +343,7 @@ static int write_tiny_sb4x8(const char *path)
 
 static int alloc_term_grid(struct terminal_t *term, int width, int height)
 {
+	struct screen_t *scr;
 	int i;
 
 	memset(term, 0, sizeof(*term));
@@ -351,13 +353,17 @@ static int alloc_term_grid(struct terminal_t *term, int width, int height)
 	term->lines = height / CELL_HEIGHT;
 	if (term->cols < 1 || term->lines < 1)
 		return -1;
-	term->line_dirty = calloc((size_t)term->lines, sizeof(bool));
-	term->cells = calloc((size_t)term->lines, sizeof(struct cell_t *));
-	if (!term->line_dirty || !term->cells)
+	/* Mirror term_init(): primary screen is the active one. */
+	term->active = 0;
+	scr = &term->scr[0];
+	scr->allocated  = true;
+	scr->line_dirty = calloc((size_t)term->lines, sizeof(bool));
+	scr->cells      = calloc((size_t)term->lines, sizeof(struct cell_t *));
+	if (!scr->line_dirty || !scr->cells)
 		return -1;
 	for (i = 0; i < term->lines; i++) {
-		term->cells[i] = calloc((size_t)term->cols, sizeof(struct cell_t));
-		if (!term->cells[i])
+		scr->cells[i] = calloc((size_t)term->cols, sizeof(struct cell_t));
+		if (!scr->cells[i])
 			return -1;
 	}
 	return 0;
@@ -439,13 +445,15 @@ int main(void)
 	/* G: term_release_transient clears sixel canvas only */
 	g_cell_w = 6;
 	g_cell_h = 12;
+	struct screen_t *gscr;
 	expect(alloc_term_grid(&term, 36, 24) == 0, "G alloc grid");
+	gscr = active_screen(&term);
 	sixel_canvas_ensure(&term);
-	expect(cell_pixmap_ensure(&term.cells[0][0]) != NULL, "G cell pixmap");
-	term.cells[0][0].pixmap[0] = 0x5A;
+	expect(cell_pixmap_ensure(&gscr->cells[0][0]) != NULL, "G cell pixmap");
+	gscr->cells[0][0].pixmap[0] = 0x5A;
 	term_release_transient(&term);
 	expect(term.sixel.pixmap == NULL, "G release frees canvas");
-	expect(term.cells[0][0].pixmap && term.cells[0][0].pixmap[0] == 0x5A,
+	expect(gscr->cells[0][0].pixmap && gscr->cells[0][0].pixmap[0] == 0x5A,
 		"G release keeps cell pixmap");
 	free_term_cells(&term);
 
@@ -468,46 +476,50 @@ int main(void)
 	/* J: copy_cell deep-copies pixmap (ICH/DCH ownership) */
 	g_cell_w = 6;
 	g_cell_h = 12;
+	struct screen_t *jscr;
 	expect(alloc_term_grid(&term, 18, 12) == 0, "J alloc");
-	expect(cell_pixmap_ensure(&term.cells[0][0]) != NULL, "J ensure src");
-	term.cells[0][0].pixmap[0] = 0xC1;
-	term.cells[0][0].width = HALF;
-	term.cells[0][0].glyphp = glyph_get(DEFAULT_CHAR);
+	jscr = active_screen(&term);
+	expect(cell_pixmap_ensure(&jscr->cells[0][0]) != NULL, "J ensure src");
+	jscr->cells[0][0].pixmap[0] = 0xC1;
+	jscr->cells[0][0].width = HALF;
+	jscr->cells[0][0].glyphp = glyph_get(DEFAULT_CHAR);
 	copy_cell(&term, 0, 1, 0, 0);
-	expect(term.cells[0][1].has_pixmap && term.cells[0][1].pixmap, "J dst has pixmap");
-	expect(term.cells[0][1].pixmap != term.cells[0][0].pixmap, "J deep copy");
-	expect(term.cells[0][1].pixmap[0] == 0xC1, "J content");
-	cell_pixmap_clear(&term.cells[0][0]);
-	expect(term.cells[0][1].pixmap[0] == 0xC1, "J src clear leaves dst");
+	expect(jscr->cells[0][1].has_pixmap && jscr->cells[0][1].pixmap, "J dst has pixmap");
+	expect(jscr->cells[0][1].pixmap != jscr->cells[0][0].pixmap, "J deep copy");
+	expect(jscr->cells[0][1].pixmap[0] == 0xC1, "J content");
+	cell_pixmap_clear(&jscr->cells[0][0]);
+	expect(jscr->cells[0][1].pixmap[0] == 0xC1, "J src clear leaves dst");
 	free_term_cells(&term);
 
 	/* K: sixel_copy2cell must not read past canvas when cols is ceil(width/cw)
 	 * (PicoCalc-style 320%6!=0). Force cols=54 while width=320. */
 	g_cell_w = 6;
 	g_cell_h = 12;
+	struct screen_t *kscr;
 	memset(&term, 0, sizeof(term));
 	term.width = 320;
 	term.height = 24;
 	term.cols = 54; /* ceil(320/6); wider than width/CELL_WIDTH */
 	term.lines = 2;
-	term.line_dirty = calloc(2, sizeof(bool));
-	term.cells = calloc(2, sizeof(struct cell_t *));
-	expect(term.line_dirty && term.cells, "K meta");
-	term.cells[0] = calloc(54, sizeof(struct cell_t));
-	term.cells[1] = calloc(54, sizeof(struct cell_t));
-	expect(term.cells[0] && term.cells[1], "K rows");
+	kscr = active_screen(&term);
+	kscr->line_dirty = calloc(2, sizeof(bool));
+	kscr->cells = calloc(2, sizeof(struct cell_t *));
+	expect(kscr->line_dirty && kscr->cells, "K meta");
+	kscr->cells[0] = calloc(54, sizeof(struct cell_t));
+	kscr->cells[1] = calloc(54, sizeof(struct cell_t));
+	expect(kscr->cells[0] && kscr->cells[1], "K rows");
 	expect(sixel_canvas_ensure(&term) == 0, "K canvas");
 	canvas_bytes = (size_t)term.width * (size_t)term.height * (size_t)BYTES_PER_PIXEL;
 	memset(term.sixel.pixmap, 0xA5, canvas_bytes);
 	term.sixel.width = 320;
 	term.sixel.height = 12;
 	term.sixel.line_length = BYTES_PER_PIXEL * term.width;
-	term.cursor.x = 0;
-	term.cursor.y = 0;
+	kscr->cursor.x = 0;
+	kscr->cursor.y = 0;
 	sixel_copy2cell(&term, &term.sixel); /* ASAN fails on OOB without row clamp */
-	expect(term.cells[0][53].has_pixmap && term.cells[0][53].pixmap,
+	expect(kscr->cells[0][53].has_pixmap && kscr->cells[0][53].pixmap,
 		"K partial right cell filled");
-	lastpx = term.cells[0][53].pixmap;
+	lastpx = kscr->cells[0][53].pixmap;
 	expect(lastpx[0] == 0xA5 && lastpx[4] == 0xA5, "K partial cell got 2px");
 	expect(lastpx[2 * 4] == 0, "K bytes past clipped width stay clear");
 	sixel_canvas_free(&term);
@@ -540,6 +552,7 @@ int main(void)
 		expect(fdf >= 0, "M mkstemp");
 		if (fdf >= 0) {
 			struct framebuffer_t fbm;
+			struct screen_t *mscr;
 			uint8_t *mfp;
 
 			close(fdf);
@@ -551,23 +564,24 @@ int main(void)
 			memset(&term, 0, sizeof(term));
 			expect(alloc_term_grid(&term, M_W, M_H) == 0, "M alloc 53x26");
 			expect(term.cols == 53 && term.lines == 26, "M PicoCalc grid 53x26");
+			mscr = active_screen(&term);
 
 			/* populate cells: row 0 bg=1 (distinct from margin color 0),
 			 * other rows bg=0; '?' marker at (0,5) */
 			for (int y = 0; y < term.lines; y++) {
 				for (int x = 0; x < term.cols; x++) {
-					struct cell_t *c = &term.cells[y][x];
+					struct cell_t *c = &mscr->cells[y][x];
 
 					c->glyphp = (y == 0 && x == 5) ? glyph_get(0x3f): glyph_get(0x20);
 					c->color_pair.fg = 7;
 					c->color_pair.bg = (y == 0) ? 1: 0;
 					c->width = HALF;
 				}
-				term.line_dirty[y] = true;
+				mscr->line_dirty[y] = true;
 			}
 			term.mode = MODE_AMRIGHT; /* no cursor: keep assertions plain */
 			term.palette_modified = false;
-			term.cursor.x = term.cursor.y = 0;
+			mscr->cursor.x = mscr->cursor.y = 0;
 
 			memset(&fbm, 0, sizeof(fbm));
 			mfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
@@ -984,6 +998,7 @@ int main(void)
 		expect(fqf >= 0, "Q mkstemp");
 		if (fqf >= 0) {
 			struct framebuffer_t fbq;
+			struct screen_t *qscr;
 			uint8_t *qfp;
 			const char *roots_saved[2];
 
@@ -1044,21 +1059,22 @@ int main(void)
 			term.lines = (M_H - term.oy) / CELL_HEIGHT; /* as term_init() */
 			expect(term.cols == 53 && term.lines == 26,
 				"Q grid 53x26 below the bar");
+			qscr = active_screen(&term);
 
 			for (int y = 0; y < term.lines; y++) {
 				for (int x = 0; x < term.cols; x++) {
-					struct cell_t *c = &term.cells[y][x];
+					struct cell_t *c = &qscr->cells[y][x];
 
 					c->glyphp = glyph_get(0x20);
 					c->color_pair.fg = 7;
 					c->color_pair.bg = 1;
 					c->width = HALF;
 				}
-				term.line_dirty[y] = true;
+				qscr->line_dirty[y] = true;
 			}
 			term.mode = MODE_AMRIGHT;
 			term.palette_modified = false;
-			term.cursor.x = term.cursor.y = 0;
+			qscr->cursor.x = qscr->cursor.y = 0;
 
 			memset(&fbq, 0, sizeof(fbq));
 			qfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
@@ -1161,8 +1177,8 @@ int main(void)
 					m_fill(qb, 0xFFFFFFFFu, M_W * M_H);
 					fbq.buf = qb;
 					for (int y = 0; y < term.lines; y++)
-						term.line_dirty[y] = false;
-					term.line_dirty[3] = true;
+						qscr->line_dirty[y] = false;
+					qscr->line_dirty[3] = true;
 					refresh(&fbq, &term);
 					for (int dy = 0; dy < CELL_HEIGHT; dy++) {
 						expect(m_px_at(qfp, 10,
@@ -1207,6 +1223,41 @@ int main(void)
 			unlink(qsb);
 			unlink(qm);
 		}
+	}
+
+	/* R: screen split (struct screen_t, prep for DECALT): all screen
+	 * state routes through active_screen() to scr[0]; scr[1] stays
+	 * reserved and must never be allocated or written. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *rscr, *ralt;
+
+		expect(alloc_term_grid(&term, 36, 36) == 0, "R alloc 6x3");
+		rscr = active_screen(&term);
+		expect(term.active == 0, "R active is primary");
+		expect(rscr == &term.scr[0], "R accessor routes to scr[0]");
+		expect(rscr->allocated == true, "R primary marked allocated");
+		ralt = &term.scr[1];
+		expect(ralt->cells == NULL && ralt->line_dirty == NULL &&
+			ralt->tabstop == NULL && ralt->allocated == false,
+			"R alternate reserved");
+		expect(ralt->cursor.x == 0 && ralt->cursor.y == 0 &&
+			ralt->scroll.top == 0 && ralt->scroll.bottom == 0,
+			"R alternate zeroed");
+
+		/* writes via the public cell API must land in scr[0] */
+		expect(cell_pixmap_ensure(&rscr->cells[0][0]) != NULL, "R ensure");
+		rscr->cells[0][0].pixmap[0] = 0x77;
+		rscr->cells[0][0].width = HALF;
+		copy_cell(&term, 1, 2, 0, 0);
+		expect(rscr->cells[1][2].has_pixmap && rscr->cells[1][2].pixmap,
+			"R copy lands in scr[0]");
+		expect(rscr->cells[1][2].pixmap[0] == 0x77, "R copied content");
+		erase_cell(&term, 2, 3);
+		expect(rscr->line_dirty[2] == true, "R erase dirties scr[0]");
+		expect(ralt->cells == NULL, "R alternate still untouched");
+		free_term_cells(&term);
 	}
 
 	if (failures) {

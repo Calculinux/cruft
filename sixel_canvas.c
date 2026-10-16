@@ -124,10 +124,13 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 	int src_offset, dst_offset;
 	size_t canvas_bytes;
 	struct cell_t *cellp;
+	struct screen_t *scr;
 	uint8_t *dst;
 
 	if (!term || !sc || !sc->pixmap)
 		return;
+
+	scr = active_screen(term);
 
 	if (sc->height > term->height)
 		sc->height = term->height;
@@ -135,8 +138,8 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 	cols  = my_ceil_local(sc->width, CELL_WIDTH);
 	lines = my_ceil_local(sc->height, CELL_HEIGHT);
 
-	if (cols + term->cursor.x > term->cols)
-		cols -= (cols + term->cursor.x - term->cols);
+	if (cols + scr->cursor.x > term->cols)
+		cols -= (cols + scr->cursor.x - term->cols);
 
 	canvas_bytes = (size_t)BYTES_PER_PIXEL * (size_t)term->width * (size_t)term->height;
 
@@ -145,8 +148,8 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc)
 			size_t row_bytes = sixel_cell_row_bytes(x, term->width);
 			if (row_bytes == 0)
 				continue;
-			erase_cell(term, term->cursor.y, term->cursor.x + x);
-			cellp = &term->cells[term->cursor.y][term->cursor.x + x];
+			erase_cell(term, scr->cursor.y, scr->cursor.x + x);
+			cellp = &scr->cells[scr->cursor.y][scr->cursor.x + x];
 			dst = cell_pixmap_ensure(cellp);
 			if (!dst)
 				continue;

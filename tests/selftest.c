@@ -79,6 +79,18 @@ static void expect(int cond, const char *msg)
 	}
 }
 
+/* Nav probes hand the matcher self-contained reads, so nothing may be
+ * held over: a nonzero keep would mean a probe buffer now spells an
+ * unfinished navigation sequence. */
+static int sbnav(struct terminal_t *term, const uint8_t *buf, int n)
+{
+	unsigned keep = 1;
+	int r = sb_consume_nav(term, buf, n, &keep);
+
+	expect(keep == 0, "nav probe holds nothing back");
+	return r;
+}
+
 static int wall_env_wants_shadow(void)
 {
 	const char *c = getenv("CRUFT");
@@ -1432,31 +1444,76 @@ int main(void)
 		/* navigation keys: the native page forms only (Shift+Up /
 		 * Shift+Down on the PicoCalc); every other form stays the
 		 * program's */
-		expect(sb_consume_nav(&term, bare_up, 3) == 0, "T bare arrow passes through");
-		expect(sb_consume_nav(&term, shift_up, 7) == 0 && term.sb.view == 0,
+		expect(sbnav(&term, bare_up, 3) == 0, "T bare arrow passes through");
+		expect(sbnav(&term, shift_up, (int)sizeof shift_up) == 0
+			   && term.sb.view == 0,
 			"T shift-modified arrow passes through");
-		expect(sb_consume_nav(&term, plain_pgup, 4) == 4 && term.sb.view == 2,
+		expect(sbnav(&term, plain_pgup, 4) == 4 && term.sb.view == 2,
 			"T prior pages a half screen deeper");
-		expect(sb_consume_nav(&term, plain_pgdwn, 4) == 4 && term.sb.view == 0,
+		expect(sbnav(&term, plain_pgdwn, 4) == 4 && term.sb.view == 0,
 			"T next pages back to the live tail");
-		expect(sb_consume_nav(&term, ctrl_home, 6) == 6 && term.sb.view == 4,
+		expect(sbnav(&term, ctrl_home, 6) == 6 && term.sb.view == 4,
 			"T ctrl-home jumps to the oldest row");
-		expect(sb_consume_nav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+		expect(sbnav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
 			"T ctrl-end jumps to the live tail");
-		expect(sb_consume_nav(&term, bare_home, 3) == 0 && term.sb.view == 0,
-			"T bare home stays the program's");
+		{
+			/* The 3-byte head of bare Home is an ambiguous
+			 * Ctrl+Home prefix and must be held for the next
+			 * read; the full 4-byte key passes through (and
+			 * snaps the view) exactly as before. */
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, bare_home, 3, &carry) == 0
+				   && carry == 3 && term.sb.view == 2,
+				"T bare-home head held (ctrl-home ambiguity)");
+			expect(sbnav(&term, bare_home, (int)sizeof bare_home) == 0
+				   && term.sb.view == 0,
+				"T full bare home stays the program's");
+		}
 		term.sb.view = 2;
-		expect(sb_consume_nav(&term, param_pgup, 6) == 0 && term.sb.view == 0,
+		expect(sbnav(&term, param_pgup, 6) == 0 && term.sb.view == 0,
 			"T parameterised page form passes through and snaps");
 		term.sb.view = 3;
-		expect(sb_consume_nav(&term, mixed, 5) == 4 && term.sb.view == 0,
+		expect(sbnav(&term, mixed, 5) == 4 && term.sb.view == 0,
 			"T nav run then foreign byte snaps to live");
 		{
 			const uint8_t plain = 'x';
 
 			term.sb.view = 2;
-			expect(sb_consume_nav(&term, &plain, 1) == 0 && term.sb.view == 0,
+			expect(sbnav(&term, &plain, 1) == 0 && term.sb.view == 0,
 				"T plain key while browsing snaps to live");
+		}
+
+		/* A page key may arrive split across two reads (raw VMIN=1
+		 * delivers "ESC", then "[5~"); the unfinished prefix is held
+		 * for the next read and the view stays put until the held
+		 * bytes prove themselves foreign. cruft.c prepends the held
+		 * tail to the next buffer; emulated here. */
+		{
+			const uint8_t esc_only[] = {ESC};
+			const uint8_t pg_rest[]  = {'[', '5', '~'};
+			const uint8_t stray[]    = {'A'};
+			uint8_t st[16];
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, esc_only, 1, &carry) == 0
+				   && carry == 1 && term.sb.view == 2,
+				"T split nav holds lone ESC, view stays");
+			memcpy(st, esc_only, carry);
+			memcpy(st + carry, pg_rest, sizeof(pg_rest));
+			expect(sb_consume_nav(&term, st,
+					      (int)(carry + sizeof(pg_rest)),
+					      &carry) == 4
+				   && carry == 0 && term.sb.view == 4,
+				"T split nav completes to page-up");
+			term.sb.view = 2;
+			st[0] = ESC;
+			memcpy(st + 1, stray, sizeof(stray));
+			expect(sb_consume_nav(&term, st, 2, &carry) == 0
+				   && carry == 0 && term.sb.view == 0,
+				"T broken prefix forwarded, view snaps");
 		}
 
 		/* Back to the tail: stored rows leave the live lines clean, so
@@ -1468,7 +1525,7 @@ int main(void)
 		{
 			bool all = true;
 
-			expect(sb_consume_nav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+			expect(sbnav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
 				"T ctrl-end settles at the tail from deep");
 			for (int y = 0; y < term.lines; y++)
 				all &= tscr->line_dirty[y];
@@ -1480,7 +1537,7 @@ int main(void)
 		{
 			bool all = true;
 
-			expect(sb_consume_nav(&term, mixed, 5) == 4 && term.sb.view == 0,
+			expect(sbnav(&term, mixed, 5) == 4 && term.sb.view == 0,
 				"T foreign byte snaps to live");
 			for (int y = 0; y < term.lines; y++)
 				all &= tscr->line_dirty[y];
@@ -1490,7 +1547,7 @@ int main(void)
 		/* RIS resets the ring; an empty ring lets nav pass through */
 		reset(&term);
 		expect(term.sb.count == 0 && term.sb.view == 0, "T RIS empties ring");
-		expect(sb_consume_nav(&term, plain_pgup, 4) == 0,
+		expect(sbnav(&term, plain_pgup, 4) == 0,
 			"T no history: nav passes through");
 		/* tear down this generation before the re-init below, which
 		 * would otherwise leak the ring, matrices and esc buffer */
@@ -1697,10 +1754,10 @@ int main(void)
 		/* nav spans both tiers: page to the live tail, back to the
 		 * oldest row (five half-pages each way at total 10) */
 		for (int p = 0; p < 5; p++)
-			expect(sb_consume_nav(&term, plain_pgdwn, 4) == 4, "U pgdn consumed");
+			expect(sbnav(&term, plain_pgdwn, 4) == 4, "U pgdn consumed");
 		expect(term.sb.view == 0, "U paging reaches the live tail");
 		for (int p = 0; p < 5; p++)
-			expect(sb_consume_nav(&term, plain_pgup, 4) == 4, "U pgup consumed");
+			expect(sbnav(&term, plain_pgup, 4) == 4, "U pgup consumed");
 		expect(term.sb.view == 10, "U paging reaches the oldest row");
 
 		/* push while browsing MID-history: the window stays put
@@ -1742,7 +1799,7 @@ int main(void)
 				"U tier degraded: RAM only");
 			expect(stat(dead, &(struct stat) { 0 }) != 0,
 				"U corrupt file unlinked");
-			expect(sb_consume_nav(&term, ctrl_end, 6) == 6
+			expect(sbnav(&term, ctrl_end, 6) == 6
 				&& term.sb.view == 0,
 				"U nav healthy after degrade");
 		}

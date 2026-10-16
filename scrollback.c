@@ -287,12 +287,41 @@ static void sb_apply(struct terminal_t *term, enum sb_action action)
 		sb_flag_all_lines(term);
 }
 
-/* Bytes of the leading navigation run (0 = nothing to intercept: the
- * whole buffer is the shell's). */
-int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n)
+/* Longest suffix of s[len] that is a STRICT prefix of a navigation
+ * sequence (0 = nothing worth holding). Raw stdin can deliver one
+ * page key in separate reads (VMIN=1: "ESC", then "[5~"); handing the
+ * prefix to the shell early splits the key. */
+static unsigned sb_nav_hold_len(const uint8_t *s, unsigned len)
 {
-	unsigned consumed = 0;
+	unsigned maxl = 0, l;
 
+	for (unsigned i = 0; i < sizeof(nav_seqs) / sizeof(nav_seqs[0]); i++)
+		if ((unsigned)nav_seq_lens[i] - 1 > maxl)
+			maxl = (unsigned)nav_seq_lens[i] - 1;
+	if (len > maxl)
+		len = maxl;
+	for (l = len; l > 0; l--)
+		for (unsigned i = 0; i < sizeof(nav_seqs) / sizeof(nav_seqs[0]); i++)
+			if (l < (unsigned)nav_seq_lens[i]
+			    && memcmp(s + len - l, nav_seqs[i], l) == 0)
+				return l;
+	return 0;
+}
+
+/* Bytes of the leading navigation run (0 = nothing to intercept: the
+ * whole buffer is the shell's). If keep is non-NULL it receives the
+ * number of trailing bytes to carry into the next read: an unfinished
+ * navigation sequence the terminal may complete in a later read (the
+ * caller prepends them to that buffer). While held, the snap back to
+ * the live tail is deferred too, so an ESC alone does not dismiss
+ * browsing. */
+int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n,
+		   unsigned *keep)
+{
+	unsigned consumed = 0, hold = 0;
+
+	if (keep)
+		*keep = 0;
 	if (!vt_active || term->active != 0)
 		return 0; /* alt screen: the app owns every key */
 	if (sb_history_total(term) == 0)
@@ -326,11 +355,17 @@ int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n)
 	/* Whatever follows a nav run is meant for the live screen: classic
 	 * terminals snap back to the bottom on the first foreign key, and a
 	 * mouseless console needs that (typing blind over stale history is
-	 * the trap). Lone ESC included. */
-	if (consumed < (unsigned)n && term->sb.view != 0) {
-		term->sb.view = 0;
-		sb_flag_all_lines(term);
+	 * the trap). Lone ESC included - unless the buffer ends on an
+	 * unfinished nav prefix, whose verdict waits for the next read. */
+	if (consumed < (unsigned)n) {
+		hold = sb_nav_hold_len(buf + consumed, (unsigned)n - consumed);
+		if (hold < (unsigned)n - (unsigned)consumed && term->sb.view != 0) {
+			term->sb.view = 0;
+			sb_flag_all_lines(term);
+		}
 	}
+	if (keep)
+		*keep = hold;
 	return (int)consumed;
 }
 

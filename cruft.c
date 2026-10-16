@@ -160,6 +160,11 @@ int main(int argc, char *const argv[])
 	extern const char *shell_cmd; /* defined in conf.h */
 	const char *cmd;
 	uint8_t buf[BUFSIZE];
+	/* Nav prefix carried over between stdin reads: a page key can
+	 * arrive split (raw VMIN=1 delivers "ESC", then "[5~") and the
+	 * half must not reach the shell; the next read prepends it. */
+	uint8_t navcarry[SB_NAV_HOLD_MAX];
+	unsigned navcarry_n = 0;
 	ssize_t size;
 	fd_set fds;
 	struct timeval tv;
@@ -245,11 +250,29 @@ int main(int argc, char *const argv[])
 				 * front of the buffer steer the scrollback
 				 * view and are swallowed; the rest (bare arrows
 				 * among them) reaches the shell. Any foreign
-				 * byte snaps the view back to the live tail. */
+				 * byte snaps the view back to the live tail.
+				 * A nav prefix carried over from the previous
+				 * read is prepended: the terminal may deliver
+				 * one key split across reads (VMIN=1: "ESC",
+				 * then "[5~"). */
+				uint8_t stream[BUFSIZE + SB_NAV_HOLD_MAX];
+				size_t slen = (size_t)navcarry_n + (size_t)size;
 				unsigned view0 = term.sb.view;
-				int eaten = sb_consume_nav(&term, buf, (int)size);
+				int eaten;
+				unsigned keep = 0;
 
-				ewrite(term.fd, buf + eaten, (size_t)(size - eaten));
+				memcpy(stream, navcarry, navcarry_n);
+				memcpy(stream + navcarry_n, buf, (size_t)size);
+				navcarry_n = 0;
+				eaten = sb_consume_nav(&term, stream, (int)slen, &keep);
+				if (slen - (size_t)eaten > (size_t)keep)
+					ewrite(term.fd, stream + eaten,
+					       slen - (size_t)eaten - (size_t)keep);
+				if (keep > 0) {
+					memcpy(navcarry, stream + (size_t)slen - keep,
+					       (size_t)keep);
+					navcarry_n = (unsigned)keep;
+				}
 				if (eaten > 0 || term.sb.view != view0)
 					refresh(&fb, &term);
 			}

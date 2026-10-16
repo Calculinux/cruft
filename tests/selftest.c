@@ -2117,7 +2117,7 @@ int main(void)
 						       (rd = read(rp[0], got + off,
 							        (size_t) (sizeof got - 1 - off))) > 0)
 							off += (long) rd;
-						expect(off > 0 && rd <= 0, "U7 drained to EOF");
+						expect(off > 0 && rd <= 0, "V7 drained to EOF");
 					}
 					close(rp[0]);
 					rp[0] = -1;
@@ -2148,31 +2148,31 @@ int main(void)
 
 				st_b64enc(u_png, sizeof u_png, b64);
 				snprintf(mid, sizeof mid, "f=t.png;%s", b64);
-				expect(u_setup(&term) == 0, "U8 alloc");
+				expect(u_setup(&term) == 0, "V8 alloc");
 				sq = u_osc1337("File", mid, 0);
 				parse(&term, sq, (int) strlen((const char *) sq));
 				free(sq);
 				if (kitty_png_available()) {
-					const uint8_t *p = term.cells[0][0].pixmap;
+					const uint8_t *p = su->cells[0][0].pixmap;
 
-					expect(p != NULL, "U8 PNG landed");
+					expect(p != NULL, "V8 PNG landed");
 					if (p) {
 						/* cell pixels (x + y*CELL_WIDTH),
 						 * LE bytes of 0x00RRGGBB */
 						expect(p[0] == 0x00 && p[1] == 0x00
-							&& p[2] == 0xFF, "U8 TL red");
-						expect(p[4 + 1] == 0xFF, "U8 TR green");
-						expect(p[24 + 0] == 0xFF, "U8 BL blue");
+							&& p[2] == 0xFF, "V8 TL red");
+						expect(p[4 + 1] == 0xFF, "V8 TR green");
+						expect(p[24 + 0] == 0xFF, "V8 BL blue");
 						expect(p[28 + 0] == 0xFF && p[28 + 1] == 0xFF
-							&& p[28 + 2] == 0xFF, "U8 BR white");
+							&& p[28 + 2] == 0xFF, "V8 BR white");
 						expect(p[8 + 0] == 0x00 && p[8 + 2] == 0x00,
-							"U8 px beyond 2x2 stays clear");
+							"V8 px beyond 2x2 stays clear");
 					}
-					expect(term.cursor.x == 0 && term.cursor.y == 1,
-						"U8 cursor below image");
+					expect(su->cursor.x == 0 && su->cursor.y == 1,
+						"V8 cursor below image");
 				} else {
-					expect(!term.cells[0][0].has_pixmap,
-						"U8 no libpng: PNG dropped");
+					expect(!su->cells[0][0].has_pixmap,
+						"V8 no libpng: PNG dropped");
 				}
 				u_teardown(&term);
 			}

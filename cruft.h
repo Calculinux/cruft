@@ -51,9 +51,7 @@ enum misc {
 	DEFAULT_CHAR       = SPACE,            /* used for erase char */
 	BRIGHT_INC         = 8,                /* value used for brightening color */
 	SB_TITLE_MAX       = 48,               /* status bar window title length (excl. NUL) */
-	SB_DEFAULT_LINES   = 96,               /* scrollback depth (CRUFT_HISTORY) */
-	SB_MAX_LINES       = 1024,             /* CRUFT_HISTORY upper clamp */
-	SB_PIXMAP_CAP_KIB  = 64,               /* sixel payload the ring retains */
+	SBDISK_CACHE_ROWS  = 8,                /* decoded disk rows held in RAM (sbdisk.c) */
 };
 
 enum char_attr {
@@ -153,19 +151,54 @@ struct screen_t {
 	bool allocated;               /* cell matrix backing store exists */
 };
 
-/* Scrollback: ring of COPIED rows drained from the primary while a
+/* Disk tier of the scrollback: session-scoped log file in /var/tmp
+ * (mkstemp, 0600, unlinked on exit) holding rows that fell out of the
+ * RAM ring. One variable-length record per row (packed cells + pixmap
+ * table); a full-record-offset dir in RAM makes browsing O(1). When
+ * the file reaches its cap the oldest quarter is compacted away.
+ * Glyph pointers are not persistable: rows serialize as
+ * (fg, bg, attr, width, bitmap) and decode through an intern table,
+ * so cached rows share one glyph block per distinct (width, bitmap).
+ * Any file damage (crash, metric mismatch) degrades the tier: RAM
+ * keeps working, the file is dropped. Little-endian on disk. */
+struct sbdisk_intern_t; /* (width, bitmap) key + owned glyph block */
+struct sbdisk_t {
+	int fd;                          /* -1 = tier not attached / degraded */
+	char path[128];                  /* temp file, unlinked on detach */
+	uint32_t cap;                    /* rows the file may hold */
+	uint32_t count;                  /* rows held */
+	uint64_t file_pos;               /* end of the newest record */
+	uint64_t *off;                   /* record start offset, oldest first */
+	size_t off_alloc;
+	uint64_t evicted;                /* records dropped from the head */
+	uint64_t epoch;                  /* bumped on compaction: ages cache */
+	struct {
+		uint64_t gen, epoch;
+		struct cell_t *cells;        /* NULL = free slot */
+	} cache[SBDISK_CACHE_ROWS];
+	struct sbdisk_intern_t *glyphs;  /* (width, bitmap) -> glyph block */
+	size_t glyph_n, glyph_alloc;
+	unsigned cache_tick;
+};
+
+/* Scrollback: two tiers over the rows drained from the primary while a
  * full-screen scroll-up erases them (sub-regions and the alt screen
- * never feed it). The ring owns its cell arrays: pixmap blocks are
- * duplicated on intake and cleared on eviction, so live-screen
- * destruction can never alias stored history. head = next write slot
- * (= oldest slot when full). view = stored rows the renderer lifts
- * above the live screen (0 = live tail). */
+ * never feed it). The RAM ring holds the newest cap rows; when the
+ * requested total depth (CRUFT_HISTORY) exceeds it, the older rows
+ * spill to the disk tier (cap + disk.cap = requested total). Both own
+ * their cell arrays: pixmap blocks are duplicated on intake and cleared
+ * on eviction, so live-screen destruction can never alias stored
+ * history. head = next write slot (= oldest slot when full).
+ * view = rows the renderer shows above the live screen (0 = live tail);
+ * while it points at stored rows a new push increments it, keeping the
+ * browsed row in place. */
 struct scrollback_t {
-	unsigned cap;              /* 0 = disabled (CRUFT_HISTORY=0 / alloc failed) */
-	unsigned count;            /* stored rows */
+	unsigned cap;              /* RAM ring depth (0 = history disabled) */
+	unsigned count;            /* rows in the RAM ring */
 	unsigned head;             /* next write slot */
 	size_t pixmap_bytes;       /* sum of sixel payloads held by the ring */
 	struct cell_t **rows;      /* ring slots, one heap row array each */
+	struct sbdisk_t disk;      /* older rows (empty when total <= cap) */
 	unsigned view;             /* rows shown above the live screen */
 };
 
@@ -230,14 +263,25 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc);
 void erase_cell(struct terminal_t *term, int y, int x);
 void copy_cell(struct terminal_t *term, int dst_y, int dst_x, int src_y, int src_x);
 
-/* scrollback (scrollback.c) */
+/* scrollback (scrollback.c + sbdisk.c) */
 void sb_init(struct terminal_t *term);
 void sb_die(struct terminal_t *term);
 void sb_reset(struct terminal_t *term);
 void sb_feed_line(struct terminal_t *term, const struct cell_t *row);
-const struct cell_t *sb_view_row(const struct terminal_t *term, int line);
-int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n);
+const struct cell_t *sb_view_row(struct terminal_t *term, int line);
+int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n,
+		   unsigned *keep);
+/* Most bytes sb_consume_nav can hand back for the next read: the longest
+ * nav sequence (Ctrl+Home/End, 6 bytes) minus one. */
+#define SB_NAV_HOLD_MAX 5
 void sb_scrub_freed_glyphs(const struct terminal_t *term, const struct glyph_t *freed, int n);
+unsigned sb_history_total(const struct terminal_t *term); /* RAM + disk rows */
+
+/* sbdisk (sbdisk.c) */
+void sbdisk_attach(struct terminal_t *term);       /* opens temp file (lazy) */
+void sbdisk_detach(struct terminal_t *term);       /* closes + unlinks, frees */
+int sbdisk_store(struct terminal_t *term, const struct cell_t *row);
+const struct cell_t *sbdisk_fetch(struct terminal_t *term, unsigned k_from_tail);
 
 #ifndef CRUFT_NO_GLOBALS
 const uint8_t attr_mask[] = {

@@ -188,3 +188,25 @@ $ make yaft
 	scrubs history cells referencing the table (no dangling glyphs)
 -	selftest section T: feeding rules, eviction order, viewport
 	mapping, nav keys, pixmap cap, disabled mode
+
+## 2026-10-15
+-	version 0.2.9
+-	scrollback disk tier (sbdisk.c): CRUFT_HISTORY is now the TOTAL
+	depth across both tiers (default 96, clamp 16384); rows older
+	than the RAM tier (CRUFT_SB_RAM, default 512) spill to a
+	session file in /var/tmp (mkstemp, 0600, unlinked on exit)
+-	disk rows store as packed cells (bitmap, not glyph pointer)
+	through a (width, bitmap) intern table; per-record sixel budget
+	32 KiB; oldest-quarter compaction at the file cap; any
+	unreadable file degrades the tier silently (RAM keeps serving)
+-	viewport spans both tiers; a push while browsing stored rows
+	pins the window on the same rows; the scrollbar sizes with the
+	total depth
+-	nav keys: the native page forms (ESC [5~/[6~], Shift+Up /
+	Shift+Down on the PicoCalc) page the scrollback, and the
+	Ctrl+Home / Ctrl+End forms (ESC [1;5H / ESC [1;5F, bound in
+	the PicoCalc console keymap) jump to the oldest row / the
+	live tail
+-	selftest section U: spill/seam mapping, nav over the combined
+	depth, pin-on-push, compaction, pixmap survival on disk,
+	corruption degradation, unlink on reset/die

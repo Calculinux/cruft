@@ -79,6 +79,18 @@ static void expect(int cond, const char *msg)
 	}
 }
 
+/* Nav probes hand the matcher self-contained reads, so nothing may be
+ * held over: a nonzero keep would mean a probe buffer now spells an
+ * unfinished navigation sequence. */
+static int sbnav(struct terminal_t *term, const uint8_t *buf, int n)
+{
+	unsigned keep = 1;
+	int r = sb_consume_nav(term, buf, n, &keep);
+
+	expect(keep == 0, "nav probe holds nothing back");
+	return r;
+}
+
 static int wall_env_wants_shadow(void)
 {
 	const char *c = getenv("CRUFT");
@@ -1354,19 +1366,22 @@ int main(void)
 
 	/* T: scrollback ring (scrollback.c): feeding rules (full-primary
 	 * scrolls only), copied-row ownership, eviction order, viewport
-	 * mapping, Meta-nav keys, RIS reset, pixmap payload cap. */
+	 * mapping, nav keys (native page forms), RIS reset,
+	 * pixmap payload cap. */
 	g_cell_w = 6;
 	g_cell_h = 12;
 	{
 		struct screen_t *tscr;
 		const struct glyph_t *qm = glyph_get(0x3f);
-		const uint8_t bare_up[]   = {ESC, '[', 'A'};
-		const uint8_t meta_up[]   = {ESC, ESC, '[', 'A'};
-		const uint8_t ss3_down[]  = {ESC, ESC, 'O', 'B'};
-		const uint8_t meta_pgup[] = {ESC, ESC, '[', '5', '~'};
-		const uint8_t meta_home[] = {ESC, ESC, '[', '7', '~'};
-		const uint8_t meta_end[]  = {ESC, ESC, '[', '8', '~'};
-		const uint8_t mixed[]     = {ESC, ESC, '[', 'A', 'x'};
+		const uint8_t bare_up[]     = {ESC, '[', 'A'};
+		const uint8_t shift_up[]    = {ESC, '[', '1', ';', '2', 'A'};
+		const uint8_t plain_pgup[]  = {ESC, '[', '5', '~'};
+		const uint8_t plain_pgdwn[] = {ESC, '[', '6', '~'};
+		const uint8_t param_pgup[]  = {ESC, '[', '5', ';', '2', '~'};
+		const uint8_t ctrl_home[]   = {ESC, '[', '1', ';', '5', 'H'};
+		const uint8_t ctrl_end[]    = {ESC, '[', '1', ';', '5', 'F'};
+		const uint8_t bare_home[]   = {ESC, '[', '1', '~'};
+		const uint8_t mixed[]       = {ESC, '[', '5', '~', 'x'};
 
 		setenv("CRUFT_HISTORY", "4", 1);
 		expect(term_init(&term, 96, 48), "T term_init 16x4");
@@ -1426,33 +1441,149 @@ int main(void)
 		expect(term.sb.count == 4, "T alt scroll does not drain");
 		leave_alt_screen(&term);
 
-		/* navigation keys: Meta-prefixed only, leading-run consumption */
-		expect(sb_consume_nav(&term, bare_up, 3) == 0, "T bare arrow passes through");
-		expect(sb_consume_nav(&term, meta_up, 4) == 4 && term.sb.view == 1,
-			"T meta-up browses deeper");
-		expect(sb_consume_nav(&term, ss3_down, 4) == 4 && term.sb.view == 0,
-			"T SS3 down back to live");
-		expect(sb_consume_nav(&term, meta_pgup, 5) == 5 && term.sb.view == 2,
-			"T pgup steps a half page");
-		expect(sb_consume_nav(&term, meta_home, 5) == 5 && term.sb.view == 4,
-			"T home jumps to oldest");
-		expect(sb_consume_nav(&term, meta_end, 5) == 5 && term.sb.view == 0,
-			"T end jumps to live tail");
+		/* navigation keys: the native page forms only (Shift+Up /
+		 * Shift+Down on the PicoCalc); every other form stays the
+		 * program's */
+		expect(sbnav(&term, bare_up, 3) == 0, "T bare arrow passes through");
+		expect(sbnav(&term, shift_up, (int)sizeof shift_up) == 0
+			   && term.sb.view == 0,
+			"T shift-modified arrow passes through");
+		expect(sbnav(&term, plain_pgup, 4) == 4 && term.sb.view == 2,
+			"T prior pages a half screen deeper");
+		expect(sbnav(&term, plain_pgdwn, 4) == 4 && term.sb.view == 0,
+			"T next pages back to the live tail");
+		expect(sbnav(&term, ctrl_home, 6) == 6 && term.sb.view == 4,
+			"T ctrl-home jumps to the oldest row");
+		expect(sbnav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+			"T ctrl-end jumps to the live tail");
+		{
+			/* The 3-byte head of bare Home is an ambiguous
+			 * Ctrl+Home prefix and must be held for the next
+			 * read; the full 4-byte key passes through (and
+			 * snaps the view) exactly as before. */
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, bare_home, 3, &carry) == 0
+				   && carry == 3 && term.sb.view == 2,
+				"T bare-home head held (ctrl-home ambiguity)");
+			expect(sbnav(&term, bare_home, (int)sizeof bare_home) == 0
+				   && term.sb.view == 0,
+				"T full bare home stays the program's");
+		}
+		term.sb.view = 2;
+		expect(sbnav(&term, param_pgup, 6) == 0 && term.sb.view == 0,
+			"T parameterised page form passes through and snaps");
 		term.sb.view = 3;
-		expect(sb_consume_nav(&term, mixed, 5) == 4 && term.sb.view == 0,
+		expect(sbnav(&term, mixed, 5) == 4 && term.sb.view == 0,
 			"T nav run then foreign byte snaps to live");
 		{
 			const uint8_t plain = 'x';
 
 			term.sb.view = 2;
-			expect(sb_consume_nav(&term, &plain, 1) == 0 && term.sb.view == 0,
+			expect(sbnav(&term, &plain, 1) == 0 && term.sb.view == 0,
 				"T plain key while browsing snaps to live");
+		}
+
+		/* A page key may arrive split across two reads (raw VMIN=1
+		 * delivers "ESC", then "[5~"); the unfinished prefix is held
+		 * for the next read and the view stays put until the held
+		 * bytes prove themselves foreign. cruft.c prepends the held
+		 * tail to the next buffer; emulated here. */
+		{
+			const uint8_t esc_only[] = {ESC};
+			const uint8_t pg_rest[]  = {'[', '5', '~'};
+			const uint8_t stray[]    = {'A'};
+			uint8_t st[16];
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, esc_only, 1, &carry) == 0
+				   && carry == 1 && term.sb.view == 2,
+				"T split nav holds lone ESC, view stays");
+			memcpy(st, esc_only, carry);
+			memcpy(st + carry, pg_rest, sizeof(pg_rest));
+			expect(sb_consume_nav(&term, st,
+					      (int)(carry + sizeof(pg_rest)),
+					      &carry) == 4
+				   && carry == 0 && term.sb.view == 4,
+				"T split nav completes to page-up");
+			term.sb.view = 2;
+			st[0] = ESC;
+			memcpy(st + 1, stray, sizeof(stray));
+			expect(sb_consume_nav(&term, st, 2, &carry) == 0
+				   && carry == 0 && term.sb.view == 0,
+				"T broken prefix forwarded, view snaps");
+		}
+
+		/* The prefix search stays anchored at the TRUE end of the
+		 * input even when foreign bytes precede it: only the
+		 * candidate length is capped, the suffix offset is not.
+		 * Foreign bytes snap the view (the user typed); the
+		 * trailing prefix is STILL held, so a page key completed
+		 * in the next read intercepts from the tail. */
+		{
+			const uint8_t esc_after5[] = { 'a', 'b', 'c', 'd', 'e', ESC };
+			const uint8_t pg_tail6[]   = { 'x', 'x', 'x', ESC, '[', '5' };
+			const uint8_t foreign6[]   = { 'a', 'b', 'c', 'd', 'e', 'f' };
+			const uint8_t pg_rest[]     = { '[', '5', '~' };
+			uint8_t st[16];
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, esc_after5, 6, &carry) == 0
+				   && carry == 1 && term.sb.view == 0,
+				"T lone ESC held after 5 foreign bytes");
+			/* the held ESC + the split page-up completing it in
+			 * the next read must still intercept */
+			st[0] = esc_after5[5];
+			memcpy(st + 1, pg_rest, sizeof(pg_rest));
+			expect(sb_consume_nav(&term, st,
+					      (int)(1 + sizeof(pg_rest)),
+					      &carry) == 4
+				   && carry == 0 && term.sb.view > 0,
+				"T held ESC after long input completes to page-up");
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, pg_tail6, 6, &carry) == 0
+				   && carry == 3 && term.sb.view == 0,
+				"T page-up tail held after 3 foreign bytes");
+			expect(sb_consume_nav(&term, foreign6, 6, &carry) == 0
+				   && carry == 0 && term.sb.view == 0,
+				"T all-foreign run forwards, view snaps");
+		}
+
+		/* Back to the tail: stored rows leave the live lines clean, so
+		 * every line must be re-flagged or the lazy painter would
+		 * keep history pixels on screen. */
+		for (int y = 0; y < term.lines; y++)
+			tscr->line_dirty[y] = false;
+		term.sb.view = 3;
+		{
+			bool all = true;
+
+			expect(sbnav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+				"T ctrl-end settles at the tail from deep");
+			for (int y = 0; y < term.lines; y++)
+				all &= tscr->line_dirty[y];
+			expect(all, "T ctrl-end re-dirties every line");
+		}
+		for (int y = 0; y < term.lines; y++)
+			tscr->line_dirty[y] = false;
+		term.sb.view = 3;
+		{
+			bool all = true;
+
+			expect(sbnav(&term, mixed, 5) == 4 && term.sb.view == 0,
+				"T foreign byte snaps to live");
+			for (int y = 0; y < term.lines; y++)
+				all &= tscr->line_dirty[y];
+			expect(all, "T snap-back re-dirties every line");
 		}
 
 		/* RIS resets the ring; an empty ring lets nav pass through */
 		reset(&term);
 		expect(term.sb.count == 0 && term.sb.view == 0, "T RIS empties ring");
-		expect(sb_consume_nav(&term, meta_up, 4) == 0,
+		expect(sbnav(&term, plain_pgup, 4) == 0,
 			"T no history: nav passes through");
 		/* tear down this generation before the re-init below, which
 		 * would otherwise leak the ring, matrices and esc buffer */
@@ -1570,6 +1701,233 @@ int main(void)
 			free(mfp);
 		}
 		term_die(&term);
+	}
+
+	/* U: disk tier (sbdisk.c): spill past the RAM depth, tier boundary
+	 * mapping, nav over the combined depth, push pinning, compaction,
+	 * pixmap survival on disk, corrupt-file degradation, unlink on
+	 * reset and death. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *uscr;
+		const struct glyph_t *qm = glyph_get(0x3f);
+		const uint8_t plain_pgup[]  = {ESC, '[', '5', '~'};
+		const uint8_t plain_pgdwn[] = {ESC, '[', '6', '~'};
+		const uint8_t ctrl_end[]    = {ESC, '[', '1', ';', '5', 'F'};
+
+		/* total 10, RAM tier 3: the disk tier takes the other 7 */
+		setenv("CRUFT_HISTORY", "10", 1);
+		setenv("CRUFT_SB_RAM", "3", 1);
+		expect(term_init(&term, 96, 48), "U term_init 16x4");
+		uscr = active_screen(&term);
+		expect(term.sb.cap == 3 && term.sb.disk.cap == 7,
+			"U split 3 RAM / 7 disk");
+		expect(term.sb.disk.fd < 0 && sb_history_total(&term) == 0,
+			"U disk lazy, nothing stored");
+
+		/* three pushes fill the RAM tier; nothing spills yet */
+		for (int i = 0; i < 3; i++) {
+			int y = term.lines - 1;
+
+			term.color_pair.fg = (uint8_t) (40 + i);
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 3 && term.sb.disk.count == 0
+			&& term.sb.disk.fd < 0,
+			"U RAM tier fills before spill");
+
+		/* seven more: each eviction appends a record to the file */
+		for (int i = 3; i < 10; i++) {
+			int y = term.lines - 1;
+
+			term.color_pair.fg = (uint8_t) (40 + i);
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 3 && term.sb.disk.count == 7,
+			"U 10 pushes: 3 RAM + 7 disk");
+		expect(term.sb.disk.fd >= 0 && term.sb.disk.path[0],
+			"U disk attached after first spill");
+		{
+			struct stat st;
+
+			expect(stat(term.sb.disk.path, &st) == 0 && st.st_size > 20,
+				"U history file on disk");
+		}
+		/* Drains d1..d10: d_J (J>=4) carries marker 40+J-4, the first
+		 * three are unmarked seeds (fg DEFAULT_FG). */
+		term.sb.view = 10;
+		/* the top window shows the OLDEST rows: line 0 is the top of the
+		 * oldest row, line 3 its bottom */
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == DEFAULT_FG,
+			"U top: oldest row (a seed) at the top");
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 40,
+			"U top: window bottom is d4 (disk)");
+		/* the RAM/disk seam sits between views 7 and 6 (bottom line) */
+		term.sb.view = 7;
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 43,
+			"U seam: view 7 bottom from disk");
+		term.sb.view = 6;
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 44,
+			"U seam: view 6 bottom from RAM");
+		/* a disk row is neither a live row nor a ring slot */
+		term.sb.view = 10;
+		{
+			const struct cell_t *r = sb_view_row(&term, 0);
+			bool alien = r != uscr->cells[0] && r != uscr->cells[1]
+				     && r != uscr->cells[2] && r != uscr->cells[3]
+				     && term.sb.rows && r != term.sb.rows[0]
+				     && r != term.sb.rows[1] && r != term.sb.rows[2];
+
+			expect(alien, "U disk row is decoded, not borrowed");
+		}
+		/* nav spans both tiers: page to the live tail, back to the
+		 * oldest row (five half-pages each way at total 10) */
+		for (int p = 0; p < 5; p++)
+			expect(sbnav(&term, plain_pgdwn, 4) == 4, "U pgdn consumed");
+		expect(term.sb.view == 0, "U paging reaches the live tail");
+		for (int p = 0; p < 5; p++)
+			expect(sbnav(&term, plain_pgup, 4) == 4, "U pgup consumed");
+		expect(term.sb.view == 10, "U paging reaches the oldest row");
+
+		/* push while browsing MID-history: the window stays put
+		 * (view pinned +1), the oldest row is compacted away */
+		term.sb.view = 5;
+		{
+			int y = term.lines - 1;
+
+			term.color_pair.fg = 50;
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(sb_history_total(&term) == 10 && term.sb.view == 6,
+			"U push pins the browsed row");
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == 42
+			&& sb_view_row(&term, 3)[0].color_pair.fg == 45,
+			"U window content stayed put");
+
+		/* mid-file damage degrades the tier: blank lines, RAM only,
+		 * file dropped, nav still sound */
+		{
+			int cfd = open(term.sb.disk.path, O_RDWR);
+
+			expect(cfd >= 0 && ftruncate(cfd, 21) == 0 && !close(cfd),
+				"U corruption prepared (trunc mid-record)");
+		}
+		{
+			char dead[128];
+			const struct cell_t *r;
+
+			memcpy(dead, term.sb.disk.path, sizeof(dead));
+			r = sb_view_row(&term, 1); /* not cached: must hit the file */
+
+			expect(r != NULL && r[0].color_pair.fg == DEFAULT_FG,
+				"U corrupt file serves blank rows");
+			expect(sb_history_total(&term) == 3,
+				"U tier degraded: RAM only");
+			expect(stat(dead, &(struct stat) { 0 }) != 0,
+				"U corrupt file unlinked");
+			expect(sbnav(&term, ctrl_end, 6) == 6
+				&& term.sb.view == 0,
+				"U nav healthy after degrade");
+		}
+		term_die(&term);
+
+		/* A grid wider than the 512-cell static fallback: a
+		 * degraded tier must still serve a blank row spanning
+		 * term->cols. Only the session row - which outlives
+		 * teardown - can satisfy that; the old static read OOB
+		 * (proven by the ASan lane). */
+		setenv("CRUFT_HISTORY", "12", 1);
+		setenv("CRUFT_SB_RAM", "2", 1);
+		expect(term_init(&term, 3200, 96), "U wide term_init");
+		expect(term.cols > 512,
+			"U wide grid exceeds the static fallback");
+		for (int i = 0; i < 12; i++) {
+			int y = term.lines - 1;
+
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.disk.count > 0, "U wide spill engaged");
+		{
+			int cfd = open(term.sb.disk.path, O_RDWR);
+
+			expect(cfd >= 0 && ftruncate(cfd, 21) == 0 && !close(cfd),
+				"U wide corruption prepared");
+		}
+		{
+			const struct cell_t *r;
+
+			term.sb.view = 12; /* window top = oldest = disk */
+			r = sb_view_row(&term, 0);
+			expect(r != NULL
+				&& r[512].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[512].has_pixmap == false
+				&& r[term.cols - 1].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[term.cols - 1].width == HALF,
+				"U degraded blank row spans the wide grid");
+			expect(sb_history_total(&term) == 2,
+				"U wide tier degraded: RAM only");
+		}
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+		unsetenv("CRUFT_SB_RAM");
+
+		/* pixmaps survive the trip to disk: total 6, RAM 2, disk 4 */
+		setenv("CRUFT_HISTORY", "6", 1);
+		setenv("CRUFT_SB_RAM", "2", 1);
+		expect(term_init(&term, 96, 48), "U pixmap term_init");
+		for (int i = 0; i < 6; i++) {
+			int y = term.lines - 1;
+			uint8_t *pm = cell_pixmap_ensure(&active_screen(&term)->cells[y][0]);
+
+			/* marker i+1 keeps every stored payload non-zero */
+			if (pm) {
+				pm[0] = (uint8_t) (i + 1);
+				pm[1] = (uint8_t) ((i + 1) >> 8);
+			}
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 2 && term.sb.disk.count == 4,
+			"U pixmap split 2 RAM / 4 disk");
+		term.sb.view = 6;
+		/* the window's bottom line is d4 (disk, marker 1); its top
+		 * line is d1, the first seed (art-free) */
+		expect(sb_view_row(&term, 3)[0].has_pixmap
+			&& sb_view_row(&term, 3)[0].pixmap[0] == 1
+			&& sb_view_row(&term, 3)[0].pixmap[1] == 0,
+			"U disk row kept its pixmap");
+		expect(sb_view_row(&term, 0)[0].has_pixmap == false,
+			"U seed row art-free from disk");
+		term.sb.view = 4;
+		expect(sb_view_row(&term, 3)[0].has_pixmap
+			&& sb_view_row(&term, 3)[0].pixmap[0] == 3,
+			"U RAM row still direct (regression)");
+
+		/* reset drops the ring AND unlinks the session file */
+		{
+			char dead[128];
+
+			memcpy(dead, term.sb.disk.path, sizeof(dead));
+			reset(&term);
+			expect(sb_history_total(&term) == 0 && term.sb.view == 0,
+				"U reset empties both tiers");
+			expect(stat(dead, &(struct stat) { 0 }) != 0,
+				"U reset unlinked the file");
+		}
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+		unsetenv("CRUFT_SB_RAM");
 	}
 
 	if (failures) {

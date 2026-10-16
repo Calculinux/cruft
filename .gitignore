@@ -4,3 +4,4 @@ tests/selftest
 tests/selftest-asan
 *.o
 *.cruftfont
+.claude/

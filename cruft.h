@@ -50,6 +50,7 @@ enum misc {
 	DRCS_CHARS         = DRCS_CHARSETS * GLYPHS_PER_CHARSET,
 	DEFAULT_CHAR       = SPACE,            /* used for erase char */
 	BRIGHT_INC         = 8,                /* value used for brightening color */
+	SB_TITLE_MAX       = 48,               /* status bar window title length (excl. NUL) */
 };
 
 enum char_attr {
@@ -146,6 +147,7 @@ struct terminal_t {
 	struct esc_t esc;                        /* store escape sequence */
 	uint32_t virtual_palette[COLORS];        /* virtual color palette: always 32bpp */
 	bool palette_modified;                   /* true if palette changed by OSC 4/104 */
+	char win_title[SB_TITLE_MAX + 1];        /* window title set via OSC 0/2 */
 	/* glyphs: demand-paged via glyph_get()/glyph_lookup() */
 	struct glyph_t *drcs[DRCS_CHARSETS];     /* lazy DRCS charset tables */
 	struct sixel_canvas_t sixel;

@@ -272,6 +272,10 @@ void reset(struct terminal_t *term)
 		term->line_dirty[line] = true;
 	}
 
+	/* RIS is a hard reset of everything the user sees, title included. */
+	term->win_title[0] = '\0';
+	statusbar_invalidate();
+
 	reset_esc(term);
 	reset_charset(term);
 }

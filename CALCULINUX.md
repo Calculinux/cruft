@@ -127,38 +127,77 @@ battery right. `term_init` shrinks the grid by
   path is untouched. FB type shapes live in `fb/fb.h` (definitions-free,
   so `status.c` can see them without dragging in the one-TU fb backend).
 
-## Image protocols (sixel / kitty)
+## Image protocols (sixel / kitty DCS / iTerm2)
 
-Two image paths land on the same sparse per-cell pixmaps, so scroll/erase/
-alt-screen/VT-deactivate behave identically for both:
+Three image paths land on the same sparse per-cell pixmaps, so scroll/erase/
+alt-screen/VT-deactivate behave identically for all of them:
 
 - Sixel (DCS 62 t): long-standing path, unchanged (`sixel_canvas.c`,
   `terminal_cell.c`).
-- Kitty graphics protocol (OSC 1337): `kitty_image.c`. Clients that speak
-  kitty (kitten icat, catimg, chafa -O kitty) are served instead of stalling.
+- **Kitty graphics protocol (DCS `+` / APC `_G`)** — `kitty_image.c`. The real
+  kitty wire protocol (kovidgoyal/kitty graphics-protocol spec); ratatui-image
+  speaks this, and the capability probes let its picker upgrade to Kitty
+  instead of falling back to halfblocks:
+  - Both envelopes are accepted: `ESC + <par>;<b64> ESC \` (classic DCS) and
+    `ESC _ G <par>;<b64> ESC \` (APC — normative in the shipped spec, and what
+    ratatui emits). `ESC _` parks the parser in `STATE_KPND`; only the `G`
+    introducer promotes it, and `esc_t.dcs_kind` steers `dcs_sequence()` so
+    `ESC P` stays on the sixel path.
+  - Parameters per spec: `i/I/s/v/f/m/c/r/q/a/U/t/o/d`. Chunked transfers
+    (`m=1` ... `m=0`) assemble in a growing raw buffer; the completion chunk
+    carries none of the header's parameters, so the header's are kept in the
+    transfer state and steer the outcome (store vs paint, the id-ed reply,
+    `q=` suppression).
+  - Formats: f=24/32/34 (RGB/A, red-first), f=33/35 (BGR/A, blue-first),
+    f=100 PNG. `U=1` stores the fitted image in a small slot table keyed by
+    image id; `a=p` re-places it at the cursor, `a=d` deletes it, replies are
+    `ESC _ G i=<id>;OK ESC \`-shaped and honour `q=`. Direct placement (a=T
+    without U) paints at the cursor with the spec epilogue: cursor right of
+    the placed columns, down the placed lines, clamped to the grid (never
+    scrolls).
+  - Display: the renderer prints U+10EEEE placeholder cells carrying the id in
+    a truecolor SGR foreground (low 24 bits as rgb, the high byte riding on a
+    third diacritic); every row head wears its (row, col) diacritics, the rest
+    inherit. `kitty_ph_feed()` (addch front door) swallows those cells —
+    combining marks would otherwise be dropped as zero-width — advances the
+    cursor as a width-1 glyph, resolves the anchor (nd>=2 at row 0, col 0)
+    into the stored image, fits it into the cell box and paints with cursor
+    save/restore; newlines count the region's rows until the placement is
+    complete.
+  - Capability replies: DA1 gains the sixel bit (`ESC [?62;4;6c`), `CSI 16t`
+    reports the cell pixel size (`ESC [16;<h>;<w>t`, height first, matching
+    ratatui's matcher), `i=31` gets the byte-exact `ESC _ G i=31;OK ESC \`,
+    DSR/CPR were already answered.
+  - Documented deviations: truecolor SGR 38;2/48;2 parks the exact RGB in
+    reserved palette slots 254/255 so ids survive unquantized (those slots
+    shadow two palette grays while the dynamic colour is in effect);
+    zlib/SHM/file payloads are declined politely; no file/t= transport.
+- **iTerm2 graphics (OSC 1337 `File ;`)** — the third transport, sharing
+  `raw_expand`/`png_decode` with the DCS path:
+  - `File ;` transfer only: raw BGR/BGRA (byte order per the protocol) and PNG.
+    `w=/h=` are mandatory for raw streams; PNG natural size is trusted over any
+    claimed `w=/h=`. Channel count (3 vs 4) is inferred from the byte count.
+  - `Image ;` operators (chunked upload, query, delete, resize, ...) are not
+    implemented: every one is answered `ESC ]1337 ; Rep ; i=<id> ; ok=false ;
+    t=<reason> BEL` so probing clients degrade to text rather than hanging.
 
-Kitty scope:
-- `File ;` transfer only: raw BGR/BGRA (byte order per the protocol) and PNG.
-  `w=/h=` are mandatory for raw streams; PNG natural size is trusted over any
-  claimed `w=/h=`. Channel count (3 vs 4) is inferred from the byte count.
-- `Image ;` operators (chunked upload, query, delete, resize, ...) are not
-  implemented: every one is answered `ESC ]1337 ; Rep ; i=<id> ; ok=false ;
-  t=<reason> BEL` so probing clients degrade to text rather than hanging.
+Shared placement for all image paths:
 - Budgets: decoded image capped at `KITTY_MAX_PIXELS` (512x512) and payload at
   ~8 MB; over-budget transfers are dropped with a stderr note, screen untouched.
-- Placement anchors at the cursor and fits (nearest-neighbour, aspect preserved
-  by default, `a=no` for 1:1+crop) into the region to the grid edges; it never
-  scrolls. The cursor ends at column 0 of the first row below the image.
-- Alpha: `t=yes` composites over the current background colour; the default
-  `t=no` renders opaque (alpha dropped). Unfilled sub-cell fringe stays black
-  (parity with sixel; cells have no alpha channel).
+- Anchors at the cursor and fits (nearest-neighbour, aspect preserved by
+  default, `a=no` for 1:1+crop on the OSC path) into the region to the grid
+  edges; it never scrolls. On the OSC path the cursor ends at column 0 of the
+  first row below the image; the DCS path uses the spec's right/down epilogue.
+- Alpha composites over the current background colour when the payload has one
+  (the DCS `t=d` flag and the OSC `t=yes`); cells have no alpha channel of
+  their own, unfilled sub-cell fringe stays black (parity with sixel).
 
 PNG is optional (system libpng, high-level `png_image` API only). The makefile
 prefers an explicit `HAVE_PNG=1/0`, then `PNG_CFLAGS`/`PNG_LIBS` hints (the
 cross recipe forwards pkg-config output), otherwise it probes the toolchain for
 the `png_image` entry points. Without libpng the binary builds and runs, and
-PNG `File ;` payloads are dropped with a note (raw BGR/BGRA and the Image/Rep
-path are unaffected).
+PNG payloads (DCS f=100 and OSC `File ;`) are dropped with a note; raw pixel
+transfers on every path and the Image/Rep path are unaffected.
 
 ## Build / test
 

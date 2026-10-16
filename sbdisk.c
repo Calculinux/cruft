@@ -87,6 +87,10 @@ static uint64_t sbd_min_record(const struct terminal_t *term)
 	return sizeof(struct sbrec_hdr) + (uint64_t)term->cols * SBDISK_CELL + 2;
 }
 
+/* Width-sized blank row (see sbd_blank); session-scoped, dropped in
+ * sbd_teardown. */
+static struct cell_t *sbd_blk;
+
 /* --- teardown --------------------------------------------------------- */
 
 static void sbd_teardown(const struct terminal_t *term, struct sbdisk_t *sd, const char *err)
@@ -114,6 +118,8 @@ static void sbd_teardown(const struct terminal_t *term, struct sbdisk_t *sd, con
 	memset(sd, 0, sizeof *sd);
 	sd->cap = cap;
 	sd->fd = -1;
+	free(sbd_blk);
+	sbd_blk = NULL;
 	if (err)
 		fprintf(stderr, "cruft: scrollback-disk: %s\n", err);
 }
@@ -267,15 +273,15 @@ static int sbd_pack(const struct terminal_t *term, const struct cell_t *row,
 /* Blank row handed out when the disk tier cannot serve a line: erased
  * cells, no pixmaps. draw_line indexes term->cols cells, which nothing
  * bounds but framebuffer width / cell width, so the row is built at
- * attach for the real width; the fixed static below only covers a
- * blank request that somehow precedes attach. Deliberately kept until
- * exit: the fetch path wants a blank row precisely AFTER a failed
- * allocation, so dropping it on teardown could resurrect the fault. */
+ * attach for the real width and dropped with the session on teardown;
+ * the fixed static below covers a blank request outside any session.
+ * (The OOM-fetch path degrades - dropping the row - before serving
+ * the blank, so it lands on the static: fine at real widths, which
+ * fit it comfortably.) */
 #define SBDISK_BLANK_FALLBACK_COLS 512
 
 static struct cell_t sbd_blk_static[SBDISK_BLANK_FALLBACK_COLS];
 static bool sbd_blk_static_ready;
-static struct cell_t *sbd_blk;
 
 static void sbd_blank_fill(struct cell_t *row, unsigned cols)
 {

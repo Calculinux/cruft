@@ -467,6 +467,9 @@ bool term_init(struct terminal_t *term, int width, int height)
 	term->scr[1]    = (struct screen_t) {0};
 	term->alt_saved = (struct alt_saved_t) {0};
 	term->sb        = (struct scrollback_t) {0};
+	term->sb.disk.fd = -1; /* zeroed-struct guard (cf. sb_init): the
+			       * OOM die path below must never close()
+			       * what reads as stdin */
 
 	/* allocate memory (primary screen only) */
 	term->esc.buf      = (char *) ecalloc(1, term->esc.size);

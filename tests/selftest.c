@@ -1632,9 +1632,12 @@ int main(void)
 
 		/* Bar geometry on 320x320: the first stored row anchors the
 		 * grid left (x0 is grid, not margin) and the 2px slider rides
-		 * the right edge; track palette 8, thumb palette 7. With
-		 * count 2 / view 1: thumb height 312*26/28 = 289, offset
-		 * (312-289)/2 = 11, so thumb spans y 11..299. */
+		 * the right edge; track palette 8, thumb palette 7. Direction
+		 * is pinned with view == total (the OLDEST row, top of the
+		 * document): thumb height 312*26/28 = 289, offset
+		 * (312-289)*(2-2)/2 = 0, so the thumb spans y 0..288 (a
+		 * view-scaled, not total-view-scaled, offset would put it at
+		 * y 23..311 for this state). */
 		memset(&term, 0, sizeof(term));
 		expect(alloc_term_grid(&term, M_W, M_H) == 0, "T bar fixture 53x26");
 		{
@@ -1659,7 +1662,10 @@ int main(void)
 			term.sb.cap = 4;
 			term.sb.count = 2;
 			term.sb.head = 2;
-			term.sb.view = 1;
+			term.sb.view = 2; /* == total: browsing the oldest row */
+			term.sb.disk.fd = -1; /* mirror term_init(): the zeroed
+						* sb must not read as stdin when
+						* term_die tears the tier down */
 			term.sb.rows = (struct cell_t **) ecalloc(4, sizeof(*term.sb.rows));
 			term.sb.rows[0] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
 			term.sb.rows[1] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
@@ -1694,7 +1700,7 @@ int main(void)
 			refresh(&fbm, &term);
 			expect(m_px_at(mfp, 0, 0) == 0x01010101u, "T grid anchored left");
 			expect(m_px_at(mfp, 317, 0) == 0x01010101u, "T grid reaches x317");
-			expect(m_px_at(mfp, 318, 5) == 0x08080808u, "T bar track (above thumb)");
+			expect(m_px_at(mfp, 318, 5) == 0x07070707u, "T bar thumb pinned to the top (oldest row)");
 			expect(m_px_at(mfp, 319, 100) == 0x07070707u, "T bar thumb");
 			expect(m_px_at(mfp, 318, 305) == 0x08080808u, "T bar track (below thumb)");
 			expect(m_px_at(mfp, 318, 315) == 0x00000000u, "T below grid is margin, not bar");
@@ -2000,6 +2006,28 @@ int main(void)
 		for (int i = 0; i < 6; i++)
 			expect(getenv(vkeys[i]) == NULL,
 				"V invalid or unknown lines never installed");
+
+		/* Overlong physical line (>255 bytes) is discarded whole: a
+		 * KEY=VALUE wrapped past the fgets boundary must not surface
+		 * at the next read as if it were a new line, and parsing must
+		 * resume at the line after it. */
+		{
+			char pad[256];
+
+			memset(pad, '#', sizeof pad - 1);
+			pad[sizeof pad - 1] = '\0';
+			cf = fopen(tp, "w");
+			expect(cf != NULL, "V temp path rewritable");
+			fprintf(cf, "%sCRUFT_SB_12H=1\nCRUFT_SB_RAM=256\n", pad);
+			fclose(cf);
+			for (int i = 0; i < 6; i++)
+				unsetenv(vkeys[i]);
+			conf_load_file(tp);
+			expect(getenv("CRUFT_SB_12H") == NULL,
+				"V overlong line tail (wrapped key) drained");
+			expect(strcmp(getenv("CRUFT_SB_RAM"), "256") == 0,
+				"V line after an overlong one still parses");
+		}
 		unlink(tp);
 
 		for (int i = 0; i < 6; i++) {

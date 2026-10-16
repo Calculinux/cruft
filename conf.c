@@ -92,6 +92,12 @@ void conf_load_file(const char *path)
 	fp = fopen(path, "r");
 	if (fp == NULL)
 		return; /* no config: environment and built-ins stand */
+	/* The analyzer's unix.Stream checks misfire on the overlong-line
+	 * drain (below): it assumes the drain runs to EOF, which would
+	 * make this fgets a no-op on an "indeterminate" position. The
+	 * drain stops at the next newline in every real case, so the
+	 * loop keeps reading the rest of the file normally. */
+	/* NOLINTNEXTLINE(clang-analyzer-unix.Stream) */
 	while (fgets(line, sizeof(line), fp)) {
 		char *key = line;
 		char *eq;
@@ -100,7 +106,15 @@ void conf_load_file(const char *path)
 		size_t len;
 
 		if (strchr(line, '\n') == NULL && !feof(fp)) {
+			int c;
+
 			conf_warn("cruft.conf: line too long: %.48s...\n", line);
+			/* Drain the tail of the overlong line: the rest
+			 * would otherwise surface at the next fgets as if
+			 * it were a new line, and a KEY=VALUE wrapped
+			 * past the 255-byte boundary would install. */
+			while ((c = fgetc(fp)) != EOF && c != '\n')
+				;
 			continue;
 		}
 		while (isspace((unsigned char) *key))

@@ -298,9 +298,9 @@ static unsigned sb_nav_hold_len(const uint8_t *s, unsigned len)
 	for (unsigned i = 0; i < sizeof(nav_seqs) / sizeof(nav_seqs[0]); i++)
 		if ((unsigned)nav_seq_lens[i] - 1 > maxl)
 			maxl = (unsigned)nav_seq_lens[i] - 1;
-	if (len > maxl)
-		len = maxl;
-	for (l = len; l > 0; l--)
+	/* Cap the CANDIDATE length, not the anchor: the suffix lives at
+	 * the true end of the input even when foreign input precedes it. */
+	for (l = (len > maxl) ? maxl: len; l > 0; l--)
 		for (unsigned i = 0; i < sizeof(nav_seqs) / sizeof(nav_seqs[0]); i++)
 			if (l < (unsigned)nav_seq_lens[i]
 			    && memcmp(s + len - l, nav_seqs[i], l) == 0)

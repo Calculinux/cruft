@@ -241,8 +241,21 @@ int main(int argc, char *const argv[])
 			refresh(&fb, &term);
 		}
 
-		if (check_fds(&fds, &tv, STDIN_FILENO, term.fd) == -1)
-			continue;
+		{
+			int sel = check_fds(&fds, &tv, STDIN_FILENO, term.fd);
+
+			if (sel == -1)
+				continue;
+			/* A carried nav prefix that never completes is a lone
+			 * ESC (or dead bytes): idle stdin is the verdict.
+			 * Forward it so the child loses neither the key nor
+			 * its place in the stream; a genuinely split page
+			 * key arrives inside the 15 ms tick. */
+			if (sel == 0 && navcarry_n > 0) {
+				ewrite(term.fd, navcarry, (size_t)navcarry_n);
+				navcarry_n = 0;
+			}
+		}
 
 		if (FD_ISSET(STDIN_FILENO, &fds)) {
 			if ((size = read(STDIN_FILENO, buf, BUFSIZE)) > 0) {

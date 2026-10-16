@@ -1516,6 +1516,42 @@ int main(void)
 				"T broken prefix forwarded, view snaps");
 		}
 
+		/* The prefix search stays anchored at the TRUE end of the
+		 * input even when foreign bytes precede it: only the
+		 * candidate length is capped, the suffix offset is not.
+		 * Foreign bytes snap the view (the user typed); the
+		 * trailing prefix is STILL held, so a page key completed
+		 * in the next read intercepts from the tail. */
+		{
+			const uint8_t esc_after5[] = { 'a', 'b', 'c', 'd', 'e', ESC };
+			const uint8_t pg_tail6[]   = { 'x', 'x', 'x', ESC, '[', '5' };
+			const uint8_t foreign6[]   = { 'a', 'b', 'c', 'd', 'e', 'f' };
+			const uint8_t pg_rest[]     = { '[', '5', '~' };
+			uint8_t st[16];
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, esc_after5, 6, &carry) == 0
+				   && carry == 1 && term.sb.view == 0,
+				"T lone ESC held after 5 foreign bytes");
+			/* the held ESC + the split page-up completing it in
+			 * the next read must still intercept */
+			st[0] = esc_after5[5];
+			memcpy(st + 1, pg_rest, sizeof(pg_rest));
+			expect(sb_consume_nav(&term, st,
+					      (int)(1 + sizeof(pg_rest)),
+					      &carry) == 4
+				   && carry == 0 && term.sb.view > 0,
+				"T held ESC after long input completes to page-up");
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, pg_tail6, 6, &carry) == 0
+				   && carry == 3 && term.sb.view == 0,
+				"T page-up tail held after 3 foreign bytes");
+			expect(sb_consume_nav(&term, foreign6, 6, &carry) == 0
+				   && carry == 0 && term.sb.view == 0,
+				"T all-foreign run forwards, view snaps");
+		}
+
 		/* Back to the tail: stored rows leave the live lines clean, so
 		 * every line must be re-flagged or the lazy painter would
 		 * keep history pixels on screen. */
@@ -1804,6 +1840,47 @@ int main(void)
 				"U nav healthy after degrade");
 		}
 		term_die(&term);
+
+		/* A grid wider than the 512-cell static fallback: a
+		 * degraded tier must still serve a blank row spanning
+		 * term->cols. Only the session row - which outlives
+		 * teardown - can satisfy that; the old static read OOB
+		 * (proven by the ASan lane). */
+		setenv("CRUFT_HISTORY", "12", 1);
+		setenv("CRUFT_SB_RAM", "2", 1);
+		expect(term_init(&term, 3200, 96), "U wide term_init");
+		expect(term.cols > 512,
+			"U wide grid exceeds the static fallback");
+		for (int i = 0; i < 12; i++) {
+			int y = term.lines - 1;
+
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.disk.count > 0, "U wide spill engaged");
+		{
+			int cfd = open(term.sb.disk.path, O_RDWR);
+
+			expect(cfd >= 0 && ftruncate(cfd, 21) == 0 && !close(cfd),
+				"U wide corruption prepared");
+		}
+		{
+			const struct cell_t *r;
+
+			term.sb.view = 12; /* window top = oldest = disk */
+			r = sb_view_row(&term, 0);
+			expect(r != NULL
+				&& r[512].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[512].has_pixmap == false
+				&& r[term.cols - 1].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[term.cols - 1].width == HALF,
+				"U degraded blank row spans the wide grid");
+			expect(sb_history_total(&term) == 2,
+				"U wide tier degraded: RAM only");
+		}
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+		unsetenv("CRUFT_SB_RAM");
 
 		/* pixmaps survive the trip to disk: total 6, RAM 2, disk 4 */
 		setenv("CRUFT_HISTORY", "6", 1);

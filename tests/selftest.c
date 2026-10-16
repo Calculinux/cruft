@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -422,6 +423,56 @@ static void st_b64enc(const uint8_t *in, size_t n, char *out)
 	out[o] = '\0';
 }
 
+/* Cell accessor for the DCS section (active screen of term). */
+static struct cell_t *w_px(struct terminal_t *term, int row, int col)
+{
+	return &active_screen(term)->cells[row][col];
+}
+
+/* Builds "ESC _ G <ctrl> ; <b64> ESC \\", NUL terminated. */
+static uint8_t *w_apc(const char *ctrl, const char *b64)
+{
+	size_t cn = strlen(ctrl), bn = strlen(b64);
+	uint8_t *buf = malloc(cn + bn + 8);
+	size_t o = 0;
+
+	if (!buf)
+		return NULL;
+	buf[o++] = 0x1B;
+	buf[o++] = '_';
+	buf[o++] = 'G';
+	memcpy(buf + o, ctrl, cn);
+	o += cn;
+	buf[o++] = ';';
+	memcpy(buf + o, b64, bn);
+	o += bn;
+	buf[o++] = 0x1B;
+	buf[o++] = '\\';
+	buf[o] = '\0';
+	return buf;
+}
+
+/* Drain everything already flushed into the pipe into got. The writer
+ * (term.fd) stays open for the session, so read nonblocking and stop at
+ * EAGAIN (replies are well under PIPE_BUF, one read each). */
+static long w_drain(int fd, char *got, size_t cap)
+{
+	long off = 0;
+	int fl = fcntl(fd, F_GETFL, 0);
+
+	memset(got, 0, cap);
+	if (fl >= 0)
+		(void) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+	while (off < (long) cap - 1) {
+		ssize_t rd = read(fd, got + off, (size_t) cap - 1 - (size_t) off);
+
+		if (rd <= 0)
+			break;
+		off += rd;
+	}
+	return off;
+}
+
 static int u_setup(struct terminal_t *term)
 {
 	if (alloc_term_grid(term, 60, 24) < 0)
@@ -443,6 +494,8 @@ static int u_setup(struct terminal_t *term)
 
 static void u_teardown(struct terminal_t *term)
 {
+	/* mirrors term_die(): the kitty store/xfer outlive the cells */
+	kitty_grab_free(term);
 	free_term_cells(term);
 	free(term->esc.buf);
 	term->esc.buf = NULL;
@@ -2179,6 +2232,226 @@ int main(void)
 
 			glyph_mmap_die();
 		}
+	}
+
+	/* W: kitty graphics transfer (APC _G / DCS +) end to end: probe,
+	 * chunked transfer, Unicode-placeholder display, a=p re-place,
+	 * delete, direct placement and the probe replies. Own 6x12 font
+	 * (the V section tears its mmap down, zeroing the metrics); grid
+	 * is 10x2 cells. */
+	{
+		int rp[2] = { -1, -1 };
+		char got[1024];
+		char wt[40];
+		char wfont[80];
+		int wf;
+
+		expect(pipe(rp) == 0, "W pipe");
+		snprintf(wt, sizeof wt, "/tmp/cruft-st-W-XXXXXX");
+		wf = mkstemp(wt);
+		expect(wf >= 0, "W mkstemp");
+		if (wf >= 0) {
+			close(wf);
+			unlink(wt);
+			snprintf(wfont, sizeof wfont, "%s.cruftfont", wt);
+			expect(write_tiny_font6x12(wfont) == 0, "W write 6x12 font");
+			expect(glyph_mmap_init(wfont) == 1, "W glyph init");
+			unlink(wfont);
+		}
+		if (rp[0] >= 0) {
+			uint8_t *sq;
+
+			expect(u_setup(&term) == 0, "W base setup");
+			term.fd = rp[1];
+			term.color_pair.bg = 0; /* blend over black, not u_setup's white */
+
+			/* W1: capability probe (ratatui's exact sequence) */
+			sq = w_apc("i=31,s=1,v=1,a=q,t=d,f=24", "AAAA");
+			parse(&term, sq, (int) strlen((const char *) sq));
+			free(sq);
+			expect(w_drain(rp[0], got, sizeof got) > 0, "W1 drained");
+			expect(memcmp(got, "\033_Gi=31;OK\033\\",
+					strlen("\033_Gi=31;OK\033\\")) == 0,
+				"W1 probe reply exact");
+
+			/* W2: DA1 advertises sixel (probe attribute 4 + 6) */
+			sq = (uint8_t *) malloc(4);
+			if (sq) {
+				memcpy(sq, "\033[c", 4);
+				parse(&term, sq, 3);
+				free(sq);
+			}
+			expect(w_drain(rp[0], got, sizeof got) > 0, "W2 drained");
+			expect(strstr(got, "\033[?62;4;6c") != NULL, "W2 DA1 sixel");
+
+			/* W3: cell size report (font size for the picker) */
+			sq = (uint8_t *) malloc(5);
+			if (sq) {
+				memcpy(sq, "\033[16t", 5);
+				parse(&term, sq, 5);
+				free(sq);
+			}
+			expect(w_drain(rp[0], got, sizeof got) > 0, "W3 drained");
+			expect(strstr(got, "\033[16;12;6t") != NULL, "W3 cell size");
+
+			/* W4: chunked virtual placement, then placeholder display */
+			{
+				uint8_t px[12 * 12 * 4];
+				char b64[1024], b64a[512], b64b[512];
+				int sx, sy;
+
+				for (sy = 0; sy < 12; sy++)
+					for (sx = 0; sx < 12; sx++) {
+						uint8_t *p = &px[(sy * 12 + sx) * 4];
+
+						if (sx < 6) /* red, opaque */
+							p[0] = 255, p[1] = 0, p[2] = 0, p[3] = 255;
+						else            /* blue, opaque */
+							p[0] = 0, p[1] = 0, p[2] = 255, p[3] = 255;
+					}
+				st_b64enc(px, sizeof px, b64);
+				/* split the base64 at a 3-byte boundary (340 chars) */
+				memcpy(b64a, b64, 340);
+				b64a[340] = '\0';
+				memcpy(b64b, b64 + 340, 768 - 340);
+				b64b[768 - 340] = '\0';
+
+				expect(u_setup(&term) == 0, "W4 alloc");
+				term.fd = rp[1];
+				term.color_pair.bg = 0; /* blend over black, not u_setup's white */
+
+				sq = w_apc("q=2,i=1,a=T,U=1,f=32,t=d,s=12,v=12,c=2,r=1,m=1", b64a);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_px(&term, 0, 0)->has_pixmap == false,
+					"W4 stored, not painted yet");
+
+				sq = w_apc("q=2,m=0", b64b);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) > 0, "W4 drained");
+				expect(strstr(got, "\033_Gi=1;OK") != NULL, "W4 OK reply");
+				expect(w_px(&term, 0, 0)->has_pixmap == false,
+					"W4 still only stored");
+
+				/* placeholder row: anchor (diacritics row=0 col=0
+				 * hi=0) + one inherited cell, SGR truecolor fg
+				 * carries id 1 (rgb 0,0,1) */
+				{
+					uint8_t phseq[] = {
+						0x1B, '[', '3', '8', ';', '2', ';', '0',
+						';', '0', ';', '1', 'm',
+						0xF4, 0x8E, 0xBB, 0xAE, /* U+10EEEE */
+						0xCC, 0x85, 0xCC, 0x85, 0xCC, 0x85, /* d(0)d(0)d(0) */
+						0xF4, 0x8E, 0xBB, 0xAE, /* inherited cell */
+						'\n',
+						0x1B, '[', '3', '9', 'm',
+					};
+
+					parse(&term, phseq, (int) sizeof phseq);
+					expect(w_px(&term, 0, 0)->has_pixmap
+							&& w_px(&term, 0, 0)->pixmap[2] == 0xFF
+							&& w_px(&term, 0, 0)->pixmap[0] == 0x00,
+						"W4 left half red");
+					expect(w_px(&term, 0, 1)->has_pixmap
+							&& w_px(&term, 0, 1)->pixmap[0] == 0xFF
+							&& w_px(&term, 0, 1)->pixmap[2] == 0x00,
+						"W4 right half blue");
+					expect(active_screen(&term)->cursor.x == 2
+							&& active_screen(&term)->cursor.y == 1,
+						"W4 cursor past the placement");
+				}
+
+				/* W5: a=p re-places the stored image elsewhere */
+				sq = (uint8_t *) malloc(6);
+				if (sq) {
+					memcpy(sq, "\033[2;4H", 6);
+					parse(&term, sq, 6);
+					free(sq);
+				}
+				sq = w_apc("a=p,i=1", "");
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) > 0, "W5 drained");
+				expect(strstr(got, "\033_Gi=1;OK") != NULL, "W5 place OK");
+				expect(w_px(&term, 1, 3)->has_pixmap
+						&& w_px(&term, 1, 3)->pixmap[2] == 0xFF,
+					"W5 replaced left red");
+				expect(w_px(&term, 1, 4)->has_pixmap
+						&& w_px(&term, 1, 4)->pixmap[0] == 0xFF,
+					"W5 replaced right blue");
+
+				/* W8: delete, then the id is gone */
+				sq = w_apc("a=d,d=i,i=1", "");
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				sq = w_apc("a=p,i=1", "");
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) > 0, "W8 drained");
+				expect(strstr(got, "ENOENT") != NULL, "W8 deleted id ENOENT");
+				u_teardown(&term);
+			}
+
+			/* W6: direct a=T (no virtual placement): paint at the cursor,
+			 * cursor ends cols right and lines below (spec placement
+			 * epilogue; also pins the multi-row case) */
+			{
+				uint8_t px[12 * 24 * 3];
+				char b64[2048];
+
+				for (size_t i = 0; i < 12 * 24; i++) {
+					px[i * 3 + 0] = 255; /* R first: f=24 is RGB */
+					px[i * 3 + 1] = 0;
+					px[i * 3 + 2] = 0;
+				}
+				st_b64enc(px, sizeof px, b64);
+				expect(u_setup(&term) == 0, "W6 alloc");
+				term.fd = rp[1];
+				term.color_pair.bg = 0;
+				sq = w_apc("i=7,a=T,s=12,v=24,f=24", b64);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_px(&term, 0, 0)->has_pixmap
+						&& w_px(&term, 0, 0)->pixmap[2] == 0xFF
+						&& w_px(&term, 1, 1)->has_pixmap
+						&& w_px(&term, 1, 1)->pixmap[2] == 0xFF,
+					"W6 2x2 cells red");
+				expect(active_screen(&term)->cursor.x == 2
+						&& active_screen(&term)->cursor.y == 1,
+					"W6 cursor right+down (clamped to last row)");
+
+				/* W7: f=32 RGBA alpha blended over the black background */
+				{
+					uint8_t apx[6 * 12 * 4];
+					char ab64[512];
+
+					for (size_t i = 0; i < 6 * 12; i++) {
+						apx[i * 4 + 0] = 255;
+						apx[i * 4 + 1] = 0;
+						apx[i * 4 + 2] = 0;
+						apx[i * 4 + 3] = 128;
+					}
+					st_b64enc(apx, sizeof apx, ab64);
+					expect(u_setup(&term) == 0, "W7 alloc");
+					term.fd = rp[1];
+					term.color_pair.bg = 0;
+					sq = w_apc("i=9,a=T,s=6,v=12,f=32", ab64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					/* 255 * 128/255 + 0 * 127/255 = 128 */
+					expect(w_px(&term, 0, 0)->has_pixmap
+							&& w_px(&term, 0, 0)->pixmap[2] == 128,
+						"W7 alpha blended");
+					u_teardown(&term);
+				}
+			}
+			close(rp[1]);
+			rp[1] = -1;
+			close(rp[0]);
+			rp[0] = -1;
+		}
+		glyph_mmap_die();
 	}
 
 	if (failures) {

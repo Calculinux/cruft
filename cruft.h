@@ -51,6 +51,9 @@ enum misc {
 	DEFAULT_CHAR       = SPACE,            /* used for erase char */
 	BRIGHT_INC         = 8,                /* value used for brightening color */
 	SBDISK_CACHE_ROWS  = 8,                /* decoded disk rows held in RAM (sbdisk.c) */
+	KITTY_DYN_FG       = 254,              /* palette slot shadowed by truecolor fg SGR */
+	KITTY_DYN_BG       = 255,              /* palette slot shadowed by truecolor bg SGR */
+	KITTY_PH_CODE      = 0x10EEEE,         /* kitty Unicode placeholder (private use) */
 };
 
 enum char_attr {
@@ -80,6 +83,7 @@ enum esc_state {
 	STATE_CSI   = 0x02, /* ESC [ */
 	STATE_OSC   = 0x04, /* ESC ] */
 	STATE_DCS   = 0x08, /* ESC P */
+	STATE_KPND  = 0x10, /* ESC _: awaiting G (kitty APC graphics) */
 };
 
 enum glyph_width {
@@ -106,6 +110,9 @@ struct esc_t {
 	char *bp;
 	int size;
 	enum esc_state state;
+	/* which string introduced the DCS body: 0 = ESC P (sixel et al),
+	 * '+' = kitty graphics, '_' = kitty APC (_G) graphics */
+	uint8_t dcs_kind;
 };
 
 struct charset_t {
@@ -219,6 +226,55 @@ struct kitty_args {
 	size_t method_len;      /* 0 = absent */
 };
 
+/* Kitty graphics (APC _G / DCS +) state.
+ *
+ * Transfers arrive as one or more "<ESC>_G<ctrl>;<b64><ESC>\" strings
+ * (the spec's DCS form is written "<ESC>+"; both intros are accepted).
+ * The control data is a comma-separated key=value list; the payload after
+ * the first ';' is base64 pixel data (or a PNG for f=100). */
+struct kitty_xfer {
+	uint8_t *raw;           /* growing pixel buffer */
+	size_t len, cap;
+	unsigned w, h, chan;   /* from the header chunk (s=/v=/f=) */
+	unsigned first_red;    /* f=24/32/34 start with R, f=33/35 with B */
+	int fmt;                /* requested f= */
+	/* header-chunk parameters, kept for the m=0 completion chunk,
+	 * which carries none of its own */
+	uint32_t id;
+	unsigned has_id, U, q, a;
+	unsigned c, r, has_c, has_r;
+	bool have, bad;         /* header seen / transfer poisoned */
+};
+
+#define KITTY_STORE_SLOTS 4
+
+/* A finished transfer kept for placement (a=p or Unicode placeholders). */
+struct kitty_store {
+	bool used;
+	uint32_t id;
+	uint32_t *img;          /* 0x00RRGGBB, w*h */
+	unsigned w, h;
+	unsigned vc, vr;        /* virtual placement rect in cells */
+};
+
+/* Receiver state for the kitty Unicode placeholder display mechanism:
+ * the client emits U+10EEEE cells whose SGR foreground encodes the image
+ * id (truecolor rgb = low 24 bits) followed by up to three diacritics
+ * encoding row, column and the high id byte. */
+struct kitty_ph {
+	bool pend;              /* placeholder seen, collecting diacritics */
+	int nd;
+	unsigned d[3];
+	unsigned ax, ay;        /* cell the placeholder occupied */
+	unsigned fg;            /* SGR fg at the placeholder cell */
+	struct {
+		bool on;
+		uint32_t id;
+		unsigned vc, vr;
+		unsigned rows_done;
+	} region;
+};
+
 struct terminal_t {
 	int fd;                                  /* master of pseudo terminal */
 	int width, height;                       /* terminal size (pixel) */
@@ -239,6 +295,10 @@ struct terminal_t {
 	/* glyphs: demand-paged via glyph_get()/glyph_lookup() */
 	struct glyph_t *drcs[DRCS_CHARSETS];     /* lazy DRCS charset tables */
 	struct sixel_canvas_t sixel;
+	/* kitty graphics */
+	struct kitty_xfer kgx;
+	struct kitty_store kgs[KITTY_STORE_SLOTS];
+	struct kitty_ph kph;
 };
 
 /* The screen the cursor, cells and scroll margins currently belong to.
@@ -280,6 +340,13 @@ int kitty_base64_decode(const char *in, size_t len, uint8_t *out, size_t cap, si
 int kitty_args_parse(const char *payload, struct kitty_args *ka);
 bool kitty_png_available(void);
 void kitty_image_dispatch(struct terminal_t *term, const char *payload);
+void kitty_dcs_dispatch(struct terminal_t *term, const char *body);
+bool kitty_ph_feed(struct terminal_t *term, uint32_t code);
+void kitty_ph_newline(struct terminal_t *term);
+void kitty_ph_invalidate(struct terminal_t *term);
+void kitty_xfer_abort(struct terminal_t *term);
+void kitty_grab_reset(struct terminal_t *term);
+void kitty_grab_free(struct terminal_t *term);
 
 /* terminal cells (terminal_cell.c) */
 void erase_cell(struct terminal_t *term, int y, int x);

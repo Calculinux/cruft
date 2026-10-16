@@ -50,6 +50,7 @@ void (*csi_func[ESC_CHARS])(struct terminal_t *term, struct parm_t *) = {
 	['m'] = set_attr,
 	['n'] = status_report,
 	['r'] = set_margin,
+	['t'] = window_report,
 	/* XXX: not implemented because these sequences conflict DECSLRM/DECSHTS
 	['s'] = sco_save_state,
 	['u'] = sco_restore_state,
@@ -171,6 +172,20 @@ void dcs_sequence(struct terminal_t *term, uint8_t ch)
 
 	logging(DEBUG, "dcs: DCS %s\n", term->esc.buf);
 
+	/* kitty graphics travels in the two non-DCS intros (ESC + per the
+	 * spec, ESC _ G in its APC spelling); the ESC P body below is the
+	 * traditional one (sixel, DECDLD) */
+	if (term->esc.dcs_kind == '+') {
+		kitty_dcs_dispatch(term, term->esc.buf + 1);
+		reset_esc(term);
+		return;
+	}
+	if (term->esc.dcs_kind == '_') {
+		kitty_dcs_dispatch(term, term->esc.buf + 2);
+		reset_esc(term);
+		return;
+	}
+
 	/* check DCS header */
 	cp = term->esc.buf + 1; /* skip P */
 	while (cp < term->esc.bp) {
@@ -276,6 +291,50 @@ void utf8_charset(struct terminal_t *term, uint8_t ch)
 	}
 }
 
+/* One input byte through the state machine. Factored out of parse() so
+ * that a rejected pending state can re-dispatch its byte as plain input. */
+static void parse_step(struct terminal_t *term, uint8_t ch)
+{
+	if (term->esc.state == STATE_RESET) {
+		/* interrupted by illegal byte */
+		if (term->charset.following_byte > 0 && (ch < 0x80 || ch > 0xBF)) {
+			addch(term, REPLACEMENT_CHAR);
+			reset_charset(term);
+		}
+
+		if (ch <= 0x1F)
+			control_character(term, ch);
+		else if (ch <= 0x7F)
+			addch(term, ch);
+		else
+			utf8_charset(term, ch);
+	} else if (term->esc.state == STATE_ESC) {
+		if (push_esc(term, ch))
+			esc_sequence(term, ch);
+	} else if (term->esc.state == STATE_KPND) {
+		/* after "ESC _": G starts the kitty APC graphics body; anything
+		 * else is a foreign SEP - drop the pending state and process
+		 * the byte as plain input */
+		if (ch == 'G') {
+			push_esc(term, ch);
+			term->esc.dcs_kind = '_';
+			term->esc.state    = STATE_DCS;
+		} else {
+			reset_esc(term);
+			parse_step(term, ch);
+		}
+	} else if (term->esc.state == STATE_CSI) {
+		if (push_esc(term, ch))
+			csi_sequence(term, ch);
+	} else if (term->esc.state == STATE_OSC) {
+		if (push_esc(term, ch))
+			osc_sequence(term, ch);
+	} else if (term->esc.state == STATE_DCS) {
+		if (push_esc(term, ch))
+			dcs_sequence(term, ch);
+	}
+}
+
 void parse(struct terminal_t *term, uint8_t *buf, int size)
 {
 	/*
@@ -284,35 +343,7 @@ void parse(struct terminal_t *term, uint8_t *buf, int size)
 		CTRL CHARS(DEL) : 0x7F
 		UTF-8           : 0x80 ~ 0xFF
 	*/
-	uint8_t ch;
 
-	for (int i = 0; i < size; i++) {
-		ch = buf[i];
-		if (term->esc.state == STATE_RESET) {
-			/* interrupted by illegal byte */
-			if (term->charset.following_byte > 0 && (ch < 0x80 || ch > 0xBF)) {
-				addch(term, REPLACEMENT_CHAR);
-				reset_charset(term);
-			}
-
-			if (ch <= 0x1F)
-				control_character(term, ch);
-			else if (ch <= 0x7F)
-				addch(term, ch);
-			else
-				utf8_charset(term, ch);
-		} else if (term->esc.state == STATE_ESC) {
-			if (push_esc(term, ch))
-				esc_sequence(term, ch);
-		} else if (term->esc.state == STATE_CSI) {
-			if (push_esc(term, ch))
-				csi_sequence(term, ch);
-		} else if (term->esc.state == STATE_OSC) {
-			if (push_esc(term, ch))
-				osc_sequence(term, ch);
-		} else if (term->esc.state == STATE_DCS) {
-			if (push_esc(term, ch))
-				dcs_sequence(term, ch);
-		}
-	}
+	for (int i = 0; i < size; i++)
+		parse_step(term, buf[i]);
 }

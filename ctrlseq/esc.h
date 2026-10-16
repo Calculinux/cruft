@@ -28,6 +28,7 @@ void tab(struct terminal_t *term)
 
 void nl(struct terminal_t *term)
 {
+	kitty_ph_newline(term);
 	move_cursor(term, 1, 0);
 }
 
@@ -95,7 +96,8 @@ void enter_osc(struct terminal_t *term)
 
 void enter_dcs(struct terminal_t *term)
 {
-	term->esc.state = STATE_DCS;
+	term->esc.state    = STATE_DCS;
+	term->esc.dcs_kind = 0; /* ESC P: traditional body (sixel, DECDLD) */
 }
 
 void ris(struct terminal_t *term)

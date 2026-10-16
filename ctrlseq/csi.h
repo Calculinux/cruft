@@ -122,6 +122,9 @@ void erase_display(struct terminal_t *term, struct parm_t *parm)
 
 	mode = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]);
 
+	/* a wiped screen also kills any image placement laid over it */
+	kitty_ph_invalidate(term);
+
 	if (mode < 0 || 2 < mode)
 		return;
 
@@ -352,10 +355,18 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
 				term->color_pair.fg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select foreground color from specified rgb color */
+			/* select foreground color from specified rgb color. The exact
+			 * value parks in the reserved dynamic slot (shadowing palette
+			 * entry 254) so the kitty placeholder id encoding - which is a
+			 * truecolor SGR - can be read back unquantized. */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
-				term->color_pair.fg = rgb2index(dec2num(parm->argv[i + 2]),
-					dec2num(parm->argv[i + 3]), dec2num(parm->argv[i + 4]));
+				int fr = dec2num(parm->argv[i + 2]);
+				int fg = dec2num(parm->argv[i + 3]);
+				int fb = dec2num(parm->argv[i + 4]);
+
+				term->virtual_palette[KITTY_DYN_FG] =
+					(((fr & 0xFF) << 16) | ((fg & 0xFF) << 8) | (fb & 0xFF));
+				term->color_pair.fg = KITTY_DYN_FG;
 				i += 4;
 			}
 		} else if (num == 39) {                /* reset foreground */
@@ -367,10 +378,16 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
 				term->color_pair.bg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select background color from specified rgb color */
+			/* select background color from specified rgb color (dynamic
+			 * slot, see the 38;2 case above) */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
-				term->color_pair.bg = rgb2index(dec2num(parm->argv[i + 2]),
-					dec2num(parm->argv[i + 3]), dec2num(parm->argv[i + 4]));
+				int br = dec2num(parm->argv[i + 2]);
+				int bgc = dec2num(parm->argv[i + 3]);
+				int bb = dec2num(parm->argv[i + 4]);
+
+				term->virtual_palette[KITTY_DYN_BG] =
+					(((br & 0xFF) << 16) | ((bgc & 0xFF) << 8) | (bb & 0xFF));
+				term->color_pair.bg = KITTY_DYN_BG;
 				i += 4;
 			}
 		} else if (num == 49) {                /* reset background */
@@ -405,9 +422,32 @@ void status_report(struct terminal_t *term, struct parm_t *parm)
 
 void device_attribute(struct terminal_t *term, struct parm_t *parm)
 {
-	/* TODO: refer VT525 DA */
+	/* DA1: VT220-class, sixel-capable (attribute 4 as read by
+	 * ratatui-image's capability probe, 6 the traditional sixel bit;
+	 * clients use it to auto-select a real image protocol) */
 	(void) parm;
-	ewrite(term->fd, "\033[?6c", 5); /* "I am a VT102" */
+	ewrite(term->fd, "\033[?62;4;6c", 10);
+}
+
+/* CSI Ps t: window operations - report only. Sizes in pixels, height
+ * first (xterm-style); capability probes (ratatui-image, kitty clients)
+ * rely on these to scale images into the cell grid. */
+void window_report(struct terminal_t *term, struct parm_t *parm)
+{
+	int i, num;
+	char buf[BUFSIZE];
+
+	for (i = 0; i < parm->argc; i++) {
+		num = dec2num(parm->argv[i]);
+		if (num == 14) { /* text area size */
+			snprintf(buf, BUFSIZE, "\033[4;%d;%dt",
+				term->lines * CELL_HEIGHT, term->width);
+			ewrite(term->fd, buf, strlen(buf));
+		} else if (num == 16) { /* single cell size */
+			snprintf(buf, BUFSIZE, "\033[16;%d;%dt", CELL_HEIGHT, CELL_WIDTH);
+			ewrite(term->fd, buf, strlen(buf));
+		}
+	}
 }
 
 void set_mode(struct terminal_t *term, struct parm_t *parm)

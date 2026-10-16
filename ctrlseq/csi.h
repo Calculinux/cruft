@@ -346,6 +346,12 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 			term->color_pair.bg = DEFAULT_BG;
 		} else if (1 <= num && num <= 7) {     /* set attribute */
 			term->attribute |= attr_mask[num];
+		} else if (num == 22) {
+			/* Neither bold nor faint. Modern emitters (crossterm
+			 * ResetBold, ratatui style resets) lift bold with 22;
+			 * this product historically only took the VT340-style
+			 * 21 form, so bold leaked until SGR 0 or 39. */
+			term->attribute &= ~(attr_mask[ATTR_BOLD] | attr_mask[2]);
 		} else if (21 <= num && num <= 27) {   /* reset attribute */
 			term->attribute &= ~attr_mask[num - 20];
 		} else if (30 <= num && num <= 37) {   /* set foreground */

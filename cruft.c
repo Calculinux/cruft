@@ -179,6 +179,10 @@ int main(int argc, char *const argv[])
 	if (setlocale(LC_ALL, "") == NULL) /* for wcwidth() */
 		logging(WARN, "setlocale falied\n");
 
+	/* /etc/cruft.conf defaults (environment precedence); must run
+	 * before the first CRUFT_* consumer below (font, status bar). */
+	conf_load();
+
 	if (!fb_init(&fb)) {
 		logging(FATAL, "framebuffer initialize failed\n");
 		goto fb_init_failed;

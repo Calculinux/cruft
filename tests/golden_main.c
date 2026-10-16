@@ -315,9 +315,11 @@ static void build_halfblocks_utf8(void)
 	putlit("\xe2\x96\x91\xe2\x96\x92\xe2\x96\x93");	/* shade thirds       */
 	putlit("\xe2\x97\x8b\xe2\x97\x8f");		/* small circle, full  */
 	putlit("\r\nBRAILLE  ");
-	putlit("\xe2\xa0\x90\xe2\xa0\xbf");		/* dot0, all dots   */
-	putlit("\xe2\xa2\x80");			/* left column of dots */
-	putlit("\xe2\xa3\xbc");			/* right column of dots */
+	putlit("\xe2\xa0\x90\xe2\xa0\xbf");		/* U+2810 (dot 5),
+							U+283F (all six) */
+	putlit("\xe2\xa2\x80");			/* U+2880 (dot 8,
+							tall right)    */
+	putlit("\xe2\xa3\xbc");			/* U+28FC (dots 3-8)  */
 	putlit("\r\n\033[1mBOLD\033[22m ");
 	putlit("\033[4mUNDER\033[24m ");
 	putlit("\033[31mRED\033[39m ");

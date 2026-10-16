@@ -265,28 +265,40 @@ static int sbd_pack(const struct terminal_t *term, const struct cell_t *row,
 }
 
 /* Blank row handed out when the disk tier cannot serve a line: erased
- * cells, no pixmaps. Built once (BSS page, touched only on the error
- * path); wide enough for any supported cell grid. */
-#define SBDISK_BLANK_COLS 512
+ * cells, no pixmaps. draw_line indexes term->cols cells, which nothing
+ * bounds but framebuffer width / cell width, so the row is built at
+ * attach for the real width; the fixed static below only covers a
+ * blank request that somehow precedes attach. Deliberately kept until
+ * exit: the fetch path wants a blank row precisely AFTER a failed
+ * allocation, so dropping it on teardown could resurrect the fault. */
+#define SBDISK_BLANK_FALLBACK_COLS 512
+
+static struct cell_t sbd_blk_static[SBDISK_BLANK_FALLBACK_COLS];
+static bool sbd_blk_static_ready;
+static struct cell_t *sbd_blk;
+
+static void sbd_blank_fill(struct cell_t *row, unsigned cols)
+{
+	for (unsigned x = 0; x < cols; x++) {
+		row[x].glyphp = glyph_get(DEFAULT_CHAR);
+		row[x].color_pair = (struct color_pair_t) { DEFAULT_FG, DEFAULT_BG };
+		row[x].attribute = ATTR_RESET;
+		row[x].width = HALF;
+		row[x].has_pixmap = false;
+		row[x].pixmap = NULL;
+	}
+}
 
 static const struct cell_t *sbd_blank(const struct terminal_t *term)
 {
-	static struct cell_t blk[SBDISK_BLANK_COLS];
-	static bool ready;
-
-	if (!ready) {
-		for (int x = 0; x < SBDISK_BLANK_COLS; x++) {
-			blk[x].glyphp = glyph_get(DEFAULT_CHAR);
-			blk[x].color_pair = (struct color_pair_t) { DEFAULT_FG, DEFAULT_BG };
-			blk[x].attribute = ATTR_RESET;
-			blk[x].width = HALF;
-			blk[x].has_pixmap = false;
-			blk[x].pixmap = NULL;
-		}
-		ready = true;
+	if (sbd_blk)
+		return sbd_blk;
+	if (!sbd_blk_static_ready) {
+		sbd_blank_fill(sbd_blk_static, SBDISK_BLANK_FALLBACK_COLS);
+		sbd_blk_static_ready = true;
 	}
 	(void)term;
-	return blk;
+	return sbd_blk_static;
 }
 
 /* --- attach / store / compact ------------------------------------------ */
@@ -329,6 +341,12 @@ void sbdisk_attach(struct terminal_t *term)
 		return;
 	}
 	sd->off_alloc = 32;
+	sbd_blk = (struct cell_t *) malloc((size_t)term->cols * sizeof *sbd_blk);
+	if (!sbd_blk) {
+		sbd_degrade(term, "out of memory");
+		return;
+	}
+	sbd_blank_fill(sbd_blk, term->cols);
 	sd->evicted = 0;
 	sd->epoch = 0;
 }
@@ -441,8 +459,12 @@ int sbdisk_store(struct terminal_t *term, const struct cell_t *row)
 	rc = sbd_pack(term, row, false, &buf, &len);
 	if (rc == 1)
 		rc = sbd_pack(term, row, true, &buf, &len);
-	if (rc < 0)
+	if (rc < 0) {
+		/* Packing failed (allocation): disarm like any other disk
+		 * fault instead of retrying on every later eviction. */
+		sbd_degrade(term, "out of memory");
 		return -1;
+	}
 	if (sd->count >= sd->cap && sbd_compact(term) < 0) {
 		free(buf);
 		return -1;

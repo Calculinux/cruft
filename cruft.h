@@ -267,7 +267,11 @@ void sb_die(struct terminal_t *term);
 void sb_reset(struct terminal_t *term);
 void sb_feed_line(struct terminal_t *term, const struct cell_t *row);
 const struct cell_t *sb_view_row(struct terminal_t *term, int line);
-int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n);
+int sb_consume_nav(struct terminal_t *term, const uint8_t *buf, int n,
+		   unsigned *keep);
+/* Most bytes sb_consume_nav can hand back for the next read: the longest
+ * nav sequence (Ctrl+Home/End, 6 bytes) minus one. */
+#define SB_NAV_HOLD_MAX 5
 void sb_scrub_freed_glyphs(const struct terminal_t *term, const struct glyph_t *freed, int n);
 unsigned sb_history_total(const struct terminal_t *term); /* RAM + disk rows */
 

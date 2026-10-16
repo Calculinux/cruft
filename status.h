@@ -1,11 +1,12 @@
 /* See LICENSE for licence details. */
 /*
  * status.h: top status bar rendered into the margin strip above the
- * terminal grid. 4x8 font (normally miniwi): clock in the center,
- * wifi stair + battery on the right.
+ * terminal grid. 4x8 font (normally miniwi): window title on the left,
+ * clock in the center, wifi stair + battery on the right.
  *
  * Data: sysfs (power_supply, net operstate) and /proc/net/wireless
- * (signal strength), polled once per second from the refresh() path.
+ * (signal strength), polled once per second from the refresh() path;
+ * the window title is captured by the parser (OSC 0/2) as it arrives.
  * Segments whose source is absent simply vanish; the bar itself is
  * disabled (strip reverts to normal margin) when the font is missing
  * or CRUFT_SB selects no segment.
@@ -45,6 +46,7 @@ struct sb_state {
 	int wifi;       /* -1 none / 0 off / 1-4 signal level */
 	int battery;    /* 0-100 */
 	int charging;   /* 0/1 */
+	const char *title; /* window title (OSC 0/2); NULL or "" = unset */
 };
 
 /* Poll one state snapshot (readers + discovery). Exposed for tests;
@@ -80,6 +82,20 @@ uint8_t sb_select(void);
 
 /* "14:05" or "2:05pm" (out >= 12). */
 void sb_fmt_time(time_t now, int h12, char *out);
+
+/* Copy a raw OSC 0/2 payload into a NUL-terminated title buffer,
+ * keeping printable ASCII and dropping everything else: controls, DEL,
+ * and all non-ASCII (well-formed multi-byte sequences are consumed
+ * whole so their bytes never leak in) - the 4x8 status font has no
+ * non-ASCII coverage, so such characters would render as holes.
+ * Returns 1 when the content changed (the caller may then skip a
+ * pointless status-strip invalidation). Pure; golden-tested. */
+int sb_title_set(char *out, const char *in);
+
+/* Max cells the left run may take so that it stops a full cell short
+ * of the centered run: exact for the renderer's (w - center) / 2 anchor.
+ * Pure; golden-tested. */
+int sb_fit_left(int left_n, int center_n, int total_cells);
 
 /* RSSI dBm -> stair level 1-4 (0 = n/a). */
 int sb_rf_level(int rssi);

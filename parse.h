@@ -129,10 +129,26 @@ void osc_sequence(struct terminal_t *term, uint8_t ch)
 {
 	int osc_mode;
 	struct parm_t parm;
+	/* Modes 0/2 carry free-form title text: parse_arg below NUL-splits
+	 * the buffer at every ';' (and its argv runs stop at non-
+	 * is_osc_parm bytes), so snapshot the raw payload first - a title
+	 * may legally contain ';' itself. */
+	char title_raw[512];
 
 	omit_string_terminator(term->esc.bp, ch);
 
 	logging(DEBUG, "osc: OSC %s\n", term->esc.buf);
+
+	title_raw[0] = '\0';
+	if (term->esc.buf[1] == '0' || term->esc.buf[1] == '2') {
+		const char *sep = strchr(term->esc.buf + 2, ';');
+		size_t n = sep ? strlen(sep + 1): 0;
+
+		if (n >= sizeof title_raw)
+			n = sizeof title_raw - 1;
+		memcpy(title_raw, sep ? sep + 1: "", n);
+		title_raw[n] = '\0';
+	}
 
 	reset_parm(&parm);
 	parse_arg(term->esc.buf + 1, &parm, ';', is_osc_parm); /* skip ']' */
@@ -147,8 +163,14 @@ void osc_sequence(struct terminal_t *term, uint8_t ch)
 			set_palette(term, &parm);
 		else if (osc_mode == 104)
 			reset_palette(term, &parm);
-		if (osc_mode == 8900)
+		else if (osc_mode == 8900)
 			glyph_width_report(term, &parm);
+		/* OSC 0: set icon + window title; OSC 2: set window title
+		 * (mode 1, icon only, has no home on a bare framebuffer and
+		 * is dropped). An empty payload clears the title. */
+		else if ((osc_mode == 0 || osc_mode == 2)
+			 && sb_title_set(term->win_title, title_raw))
+			statusbar_invalidate();
 	}
 	reset_esc(term);
 }

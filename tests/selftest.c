@@ -877,6 +877,99 @@ int main(void)
 			"O absent sources hidden");
 	}
 
+	/* P: status bar window title (OSC 0/2 capture + left-zone fit) */
+	{
+		int unk = 0;
+		struct sb_state st;
+		struct sb_draw d;
+		char title[SB_TITLE_MAX + 1];
+
+		/* segment keyword */
+		expect(sb_parse_segments("title", &unk) != 0, "P parse title");
+		expect((sb_parse_segments("all", &unk) &
+			sb_parse_segments("title", &unk)) != 0,
+			"P all has title");
+		expect(sb_parse_segments("title,time", &unk) ==
+			(sb_parse_segments("title", &unk) |
+			 sb_parse_segments("time", &unk)),
+			"P parse title combines");
+
+		/* title capture: printable ASCII kept, everything else dropped */
+		memset(title, 0, sizeof title);
+		expect(sb_title_set(title, "pico@calc: ~/src$ vim main.c") == 1,
+			"P set returns changed");
+		expect(strcmp(title, "pico@calc: ~/src$ vim main.c") == 0,
+			"P ascii kept");
+		expect(sb_title_set(title, "pico@calc: ~/src$ vim main.c") == 0,
+			"P same content not changed");
+		expect(sb_title_set(title, "abc") == 1 && strcmp(title, "abc") == 0,
+			"P shorter replaces longer");
+		expect(sb_title_set(title, "") == 1 && title[0] == '\0',
+			"P empty payload clears");
+
+		expect(sb_title_set(title, "a\tb\nc" "\x01" "d\177e") == 1,
+			"P controls");
+		expect(strcmp(title, "abcde") == 0, "P controls and DEL dropped");
+
+		expect(sb_title_set(title, "caf" "\xc3\xa9") == 1, "P accent in");
+		expect(strcmp(title, "caf") == 0, "P non-ASCII char dropped");
+		expect(sb_title_set(title, "a" "\xe6\xbc\xa2" "b" "\xed\xa0\x80" "c")
+			== 1, "P mixed in");
+		expect(strcmp(title, "abc") == 0, "P CJK + surrogate dropped");
+
+		/* malformed sequences shed bytes, never emit them */
+		expect(sb_title_set(title, "xy" "\xc3") == 1, "P dangling lead in");
+		expect(strcmp(title, "xy") == 0, "P dangling lead dropped");
+		expect(sb_title_set(title, "p" "\x80" "q") == 1, "P lone cont in");
+		expect(strcmp(title, "pq") == 0, "P lone continuation dropped");
+		expect(sb_title_set(title, "a" "\xc0\xaf" "b") == 1, "P overlong in");
+		expect(strcmp(title, "ab") == 0, "P overlong lead dropped");
+		expect(sb_title_set(title, "z" "\xf8\x88\x80\x80\x80" "w") == 1,
+			"P 5-byte in");
+		expect(strcmp(title, "zw") == 0, "P 5-byte sequence dropped");
+
+		/* truncation at the buffer cap, NUL-terminated */
+		{
+			char long_in[SB_TITLE_MAX + 4];
+
+			memset(long_in, 'x', sizeof long_in);
+			long_in[sizeof long_in - 1] = '\0';
+			expect(sb_title_set(title, long_in) == 1, "P oversize in");
+			expect(strlen(title) == SB_TITLE_MAX, "P truncated at cap");
+		}
+
+		/* left-zone fit: one blank cell short of the centered run */
+		expect(sb_fit_left(10, 5, 80) == 10, "P fit: short left wins");
+		expect(sb_fit_left(50, 5, 80) == 36,
+			"P fit: clamped (center 37..41, gap 36)");
+		expect(sb_fit_left(10, 5, 10) == 1, "P fit: tight strip");
+		expect(sb_fit_left(10, 9, 10) == 0, "P fit: no room");
+		expect(sb_fit_left(10, 10, 10) == 0, "P fit: center eats strip");
+		expect(sb_fit_left(10, 12, 10) == 0,
+			"P fit: center wider than strip");
+		expect(sb_fit_left(0, 5, 80) == 0, "P fit: empty left");
+		expect(sb_fit_left(5, 0, 4) == 1, "P fit: gap respected");
+
+		/* builder: title goes to the left zone */
+		memset(&st, 0, sizeof st);
+		st.now = 0;
+		st.title = "Hello World";
+		sb_build_items(&st, sb_parse_segments("title", &unk), 0, 0, &d);
+		expect(d.left.n == 11 && d.left.it[0].cp == 'H' &&
+			d.left.it[10].cp == 'd',
+			"P left zone holds title");
+		expect(d.left.it[0].col == 7, "P title light grey");
+		expect(d.center.n == 0 && d.right.n == 0, "P title only");
+		sb_build_items(&st, sb_parse_segments("time", &unk), 0, 0, &d);
+		expect(d.left.n == 0, "P title hidden when segment off");
+		st.title = "";
+		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
+		expect(d.left.n == 0, "P empty title hidden");
+		st.title = NULL;
+		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
+		expect(d.left.n == 0, "P null title hidden");
+	}
+
 	/* Q: status bar + grid shift on the PicoCalc 320x320 (bar on).
 	 * 6x12 main: oy=8, lines=(320-8)/12=26; grid rows 8..319, no bottom
 	 * strip (8 + 26*12 == 320). Strip: clock center (5 solid glyphs),

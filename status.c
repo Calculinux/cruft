@@ -7,9 +7,11 @@
  * second and repaints the 8px strip only when its content or the
  * palette changes. Layout (right side right-anchored):
  *
- *                           [HH:MM]     [wifi stair]  [battery][NN%][arrow]
+ * [window title ........]        [HH:MM]   [wifi stair] [battery][NN%][->]
  *
  * Sources, all optional (a missing source hides its segment):
+ *   title      window title the foreground app reports via OSC 0/2;
+ *              captured by the parser (parse.h) into term->win_title
  *   wifi       /sys/class/net/<if>/operstate (phy80211 devices only)
  *   signal     /proc/net/wireless Level column, dBm
  *   battery    /sys/class/power_supply/<ps>/{capacity,status}
@@ -59,9 +61,10 @@ enum {
 };
 
 enum {
-	SEG_TIME = 1 << 0,
-	SEG_WIFI = 1 << 1,
-	SEG_BATT = 1 << 2,
+	SEG_TIME  = 1 << 0,
+	SEG_WIFI  = 1 << 1,
+	SEG_BATT  = 1 << 2,
+	SEG_TITLE = 1 << 3,
 };
 
 /* Test seams: sysfs roots */
@@ -378,7 +381,7 @@ uint8_t sb_parse_segments(const char *spec, int *unknown)
 			*p = (char)(*p + 'a' - 'A');
 	}
 	if (strcmp(b, "all") == 0)
-		return (uint8_t)(SEG_TIME | SEG_WIFI | SEG_BATT);
+		return (uint8_t)(SEG_TIME | SEG_WIFI | SEG_BATT | SEG_TITLE);
 	if (strcmp(b, "none") == 0 || strcmp(b, "0") == 0)
 		return 0;
 	for (tok = strtok(b, ","); tok; tok = strtok(NULL, ",")) {
@@ -388,6 +391,8 @@ uint8_t sb_parse_segments(const char *spec, int *unknown)
 			mask |= SEG_WIFI;
 		else if (strcmp(tok, "battery") == 0)
 			mask |= SEG_BATT;
+		else if (strcmp(tok, "title") == 0)
+			mask |= SEG_TITLE;
 		else if (tok[0])
 			*unknown = 1;
 	}
@@ -435,6 +440,84 @@ uint8_t sb_batt_color(int pct)
 	return SB_C_RED;
 }
 
+/* ---------------------------------------------------------- */
+/* window title (OSC 0/2): capture + left-zone fit            */
+/* ---------------------------------------------------------- */
+
+/* Length of the well-formed UTF-8 sequence starting at s, 0 when s does
+ * not begin one. Conservative on the extremes: the goal is to consume a
+ * non-ASCII sequence whole so its bytes never reach the title, not to
+ * police every pathological codepoint (paths beyond U+10FFFF, 0xF6/0xF7
+ * leads, are simply treated as malformed and shed one byte at a time).
+ * s must hold at least 1 byte; rem is the bytes remaining at s. */
+static int sb_utf8_seq_len(const unsigned char *s, size_t rem)
+{
+	unsigned char c = s[0], lo1 = 0x80, hi1 = 0xBF;
+	int seq = 0;
+
+	if (c >= 0xC2 && c <= 0xDF)
+		seq = 2;
+	else if (c == 0xE0)
+		seq = 3, lo1 = 0xA0;       /* no overlong */
+	else if (c == 0xED)
+		seq = 3, hi1 = 0x9F;       /* no surrogates */
+	else if ((c >= 0xE1 && c <= 0xEC) || (c >= 0xEE && c <= 0xEF))
+		seq = 3;
+	else if (c == 0xF0)
+		seq = 4, lo1 = 0x90;       /* no overlong */
+	else if (c == 0xF5)
+		seq = 4, hi1 = 0x8F;       /* U+14_0000 .. U+10FFFF only */
+	else if (c >= 0xF1 && c <= 0xF4)
+		seq = 4;
+	if (!seq || rem < (size_t)seq || s[1] < lo1 || s[1] > hi1)
+		return 0;
+	for (int k = 2; k < seq; k++)
+		if (s[k] < 0x80 || s[k] > 0xBF)
+			return 0;
+	return seq;
+}
+
+int sb_title_set(char *out, const char *in)
+{
+	char tmp[SB_TITLE_MAX + 1];
+	const unsigned char *s = (const unsigned char *)in;
+	size_t len = strlen(in), oi = 0;
+
+	for (size_t i = 0; i < len; i++) {
+		int n;
+
+		if (s[i] < 0x80) {
+			if (s[i] >= 0x20 && s[i] <= 0x7E && oi < SB_TITLE_MAX)
+				tmp[oi++] = (char)s[i];
+			continue; /* control chars and DEL dropped */
+		}
+		/* non-ASCII: consume the sequence whole (anyway, it is
+		 * dropped - the status font covers no such glyphs) */
+		n = sb_utf8_seq_len(s + i, len - i);
+		i += n ? (size_t)n - 1: 0;
+	}
+	tmp[oi] = '\0';
+
+	if (strcmp(tmp, out) == 0)
+		return 0;
+	memcpy(out, tmp, oi + 1);
+	return 1;
+}
+
+int sb_fit_left(int left_n, int center_n, int total_cells)
+{
+	/* leftmost cell of the centered run: the renderer anchors it at
+	 * (w - center*wcell) / 2, which in whole cells is exactly
+	 * (total - center_n) / 2 (the sub-cell pixel remainder divided by
+	 * two can never cross another cell boundary). Leave one blank
+	 * cell between the runs. */
+	int c0 = (total_cells - center_n) / 2 - 1;
+
+	if (c0 < 0)
+		return 0;
+	return (left_n < c0) ? left_n: c0;
+}
+
 /* ----------------------------------------------------------------- */
 /* item builder (pure): polled state -> styled runs per zone         */
 /* ----------------------------------------------------------------- */
@@ -466,6 +549,11 @@ void sb_build_items(const struct sb_state *st, uint8_t seg, int h12,
 	char num[16];
 
 	memset(d, 0, sizeof *d);
+
+	/* left zone: window title (OSC 0/2); already sanitized to
+	 * printable ASCII at capture (sb_title_set) */
+	if ((seg & SEG_TITLE) && st->title && st->title[0])
+		run_str(&d->left, st->title, SB_C_TXT);
 
 	sb_fmt_time(st->now, h12, num);
 	if (seg & SEG_TIME)
@@ -591,14 +679,17 @@ void statusbar_render(struct framebuffer_t *fb, struct terminal_t *term)
 	sb_dirty = 0;
 
 	statusbar_poll_now(&st, now);
+	st.title = term->win_title;
 	sb_build_items(&st, sb_seg, sb_h12, sb_ascii, &draw);
+	w = term->width;
+	/* the left run must stop a full cell short of the centered clock */
+	draw.left.n = sb_fit_left(draw.left.n, draw.center.n, w / g_sb_cell_w);
 	if (sb_prev_ok && memcmp(&draw, &sb_prev, sizeof draw) == 0)
 		return; /* nothing to repaint */
 	sb_prev = draw;
 	sb_prev_ok = 1;
 
 	h = g_sb_cell_h;
-	w = term->width;
 	dest = fb_draw_dest(fb);
 
 	/* solid strip: wallpaper mode shows the wallpaper in the side/bottom

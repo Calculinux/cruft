@@ -217,26 +217,35 @@ void utf8_charset(struct terminal_t *term, uint8_t ch)
 		term->charset.code += ch & 0x3F;
 		term->charset.count++;
 	} else if (0xC0 <= ch && ch <= 0xDF) {
+		/* a new sequence starts valid; the continuation checks above
+		 * may still downgrade it. Also keeps a zero-initialised
+		 * charset (is_valid == false) from eating the first
+		 * multi-byte character after boot. */
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x1F;
 		term->charset.following_byte = 1;
 		term->charset.count = 0;
 		return;
 	} else if (0xE0 <= ch && ch <= 0xEF) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x0F;
 		term->charset.following_byte = 2;
 		term->charset.count = 0;
 		return;
 	} else if (0xF0 <= ch && ch <= 0xF7) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x07;
 		term->charset.following_byte = 3;
 		term->charset.count = 0;
 		return;
 	} else if (0xF8 <= ch && ch <= 0xFB) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x03;
 		term->charset.following_byte = 4;
 		term->charset.count = 0;
 		return;
 	} else if (0xFC <= ch && ch <= 0xFD) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x01;
 		term->charset.following_byte = 5;
 		term->charset.count = 0;

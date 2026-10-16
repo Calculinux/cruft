@@ -5,3 +5,4 @@ tests/selftest-asan
 *.o
 *.cruftfont
 .claude/
+tests/golden

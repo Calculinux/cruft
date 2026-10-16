@@ -19,6 +19,10 @@ PREFIX    = $(DESTDIR)/usr
 MANPREFIX = $(DESTDIR)/usr/share/man
 
 TEST_SRCS = tests/selftest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c
+# Same engine TUs as TEST_SRCS with the golden-pixel driver instead of
+# selftest.c. Flat on purpose: the Yocto recipe extracts the TEST_SRCS
+# line verbatim, so keep both lists spelled out.
+GOLDEN_SRCS = tests/golden_main.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c
 TEST_CFLAGS = $(WARNFLAGS) -O0 -g -I.
 
 # Optional system libpng: PNG payloads on the kitty graphics path (File;).
@@ -58,7 +62,7 @@ CLANG_TIDY ?= clang-tidy
 CPPCHECK ?= cppcheck
 SHELLCHECK ?= shellcheck
 
-.PHONY: all clean install uninstall test test-asan lint tidy cppcheck shellcheck check
+.PHONY: all clean install uninstall test test-asan golden lint tidy cppcheck shellcheck check
 
 all: cruft mkcruftfont
 
@@ -69,12 +73,23 @@ cruft: $(SRCS) $(HDR)
 mkcruftfont: tools/mkcruftfont.c
 	$(CC) -o $@ $< $(CFLAGS) $(LDFLAGS)
 
-test: cruft mkcruftfont tests/selftest
+test: cruft mkcruftfont tests/selftest tests/golden
 	./tests/selftest
+	./tests/golden
 	./mkcruftfont --self-check
 
 tests/selftest: $(TEST_SRCS) $(HDR)
 	$(CC) -o $@ $(TEST_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
+
+# L2 golden-pixel gate: real parse()/refresh() into a fabricated
+# 320x320 frame, whole-frame compare against tests/goldens/.
+# UPDATE_GOLDENS=1 make golden rewrites the references (requires
+# review before committing).
+golden: tests/golden
+	./tests/golden
+
+tests/golden: $(GOLDEN_SRCS) $(HDR)
+	$(CC) -o $@ $(GOLDEN_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
 
 test-asan: $(SRCS) $(HDR) tests/selftest.c
 	$(CC) -o tests/selftest-asan $(TEST_SRCS) $(ASAN_CFLAGS) $(KG_PNG_CFLAGS) -I. $(ASAN_LDFLAGS) $(KG_PNG_LDFLAGS)
@@ -85,6 +100,7 @@ lint:
 	$(CC) -fsyntax-only $(WARNFLAGS) -O2 -I. $(KG_PNG_CFLAGS) $(SRCS)
 	$(CC) -fsyntax-only $(WARNFLAGS) -O2 tools/mkcruftfont.c
 	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(TEST_SRCS)
+	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(GOLDEN_SRCS)
 
 tidy:
 	$(CLANG_TIDY) $(LINT_SRCS) -- $(WARNFLAGS) -O2 -I. $(KG_PNG_CFLAGS)
@@ -117,4 +133,4 @@ uninstall:
 	rm -f $(MANPREFIX)/man1/cruft.1
 
 clean:
-	rm -f cruft mkcruftfont tests/selftest tests/selftest-asan
+	rm -f cruft mkcruftfont tests/selftest tests/selftest-asan tests/golden

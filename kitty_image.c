@@ -1,19 +1,28 @@
 /*
- * Kitty graphics protocol (OSC 1337) (Calculinux/cruft).
+ * Kitty graphics protocol (Calculinux/cruft).
  *
- * Second image path next to sixel: clients that speak the kitty graphics
- * protocol (kitten icat, catimg, chafa -O kitty) send images as
- *     ESC ] 1337 ; File ; key=value ... ; PAYLOAD (BEL|ST)
- * with PAYLOAD being raw BGR/BGRA pixels, optionally base64-encoded, or
- * PNG (PNG only when built against the system libpng, see makefile).
+ * Second image path next to sixel. Two entrance grammars share the
+ * transfer engine:
+ *
+ *   1. The kitty graphics protocol proper (kitten icat, catimg, chafa
+ *      -O kitty, ratatui-image):  ESC + ... / ESC _ G ... ; PAYLOAD ST
+ *      with the spec's key=value control data. Raw pixel formats
+ *      honour the spec byte order (f=24/34 RGB, f=32 RGBA,
+ *      f=33 BGRA, f=35 BGR; kg_format()); PNG (f=100) only when
+ *      built against the system libpng, see makefile. Compression
+ *      (o=z) is refused with a clean ENOSYS reply.
+ *   2. Legacy OSC 1337 "File;" / "Image;" (iTerm2-style): raw BGR/BGRA
+ *      pixels (this byte order, plus the t= blending key, is a product
+ *      extension, not iTerm2's documented grammar) optionally
+ *      base64-encoded, or PNG as above.
  *
  * Placements land on the same sparse per-cell pixmaps as sixel
  * (erase_cell + cell_pixmap_ensure + the sixel_copy2cell-style
  * right-edge-clipped copy loop), so scroll/erase/alt-screen/VT-deactivate
  * behaviour is inherited for free. Images are anchored at the cursor and
  * fit (nearest neighbour, aspect preserved by default) to the region from
- * the cursor to the grid edges; they never scroll the screen. Protocol
- * pixel order is BGR(A); cell pixmaps store 0x00RRGGBB like sixel.
+ * the cursor to the grid edges; they never scroll the screen. Cell
+ * pixmaps store 0x00RRGGBB like sixel.
  *
  * Image ; operators (chunked upload, query, delete, ...) are not
  * implemented: every one of them is answered with a terse

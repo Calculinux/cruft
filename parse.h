@@ -135,16 +135,10 @@ void osc_sequence(struct terminal_t *term, uint8_t ch)
 
 	logging(DEBUG, "osc: OSC %s\n", term->esc.buf);
 
-	/* OSC 1337 (kitty graphics) has its own field grammar and its
-	 * payload contains base64 (the '+' / '/' / '=' break is_osc_parm
-	 * and parse_arg() NUL-splits the buffer in place), so hand the
-	 * pristine argument region to the module before any of that. */
-	if (memcmp(term->esc.buf + 1, "1337;", 5) == 0) {
-		kitty_image_dispatch(term, term->esc.buf + 6);
-		reset_esc(term);
-		return;
-	}
-
+	/* OSC 1337 (iTerm2-style inline images) is deliberately unsupported:
+	 * its former decoder lived in kitty_image.c until it was removed for
+	 * wanting external grounding. Such input now falls through to the
+	 * generic OSC path below and is consumed and ignored. */
 	reset_parm(&parm);
 	parse_arg(term->esc.buf + 1, &parm, ';', is_osc_parm); /* skip ']' */
 

@@ -66,7 +66,6 @@ enum char_attr {
 
 enum osc {
 	OSC_GWREPT = 8900, /* OSC Ps: mode number of cruft GWREPT */
-	OSC_KITTY_GRAPHICS = 1337, /* kitty graphics protocol (File;/Image;) */
 };
 
 enum term_mode {
@@ -209,23 +208,6 @@ struct scrollback_t {
 	unsigned view;             /* rows shown above the live screen */
 };
 
-/* One parsed OSC 1337 argument list (kitty graphics protocol).
- * Pointer members borrow memory from the caller's escape buffer, valid
- * until reset_esc(). */
-struct kitty_args {
-	const char *action;      /* "File" or "Image" */
-	const char *data;        /* payload (base64 or raw, see .base64) */
-	size_t data_len;
-	long width, height;      /* -1 = not given (mandatory for raw) */
-	int preserve_aspect;    /* a=, default 1 */
-	int base64;             /* b=, default 1 */
-	int transparency;       /* t=, default 0 */
-	const char *id;         /* i= transfer id (Image); length: id_len */
-	size_t id_len;          /* 0 = absent */
-	const char *method;     /* m= operation (Image); length: method_len */
-	size_t method_len;      /* 0 = absent */
-};
-
 /* Kitty graphics (APC _G / DCS +) state.
  *
  * Transfers arrive as one or more "<ESC>_G<ctrl>;<b64><ESC>\" strings
@@ -337,9 +319,7 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc);
 
 /* kitty_image.c */
 int kitty_base64_decode(const char *in, size_t len, uint8_t *out, size_t cap, size_t *out_len);
-int kitty_args_parse(const char *payload, struct kitty_args *ka);
 bool kitty_png_available(void);
-void kitty_image_dispatch(struct terminal_t *term, const char *payload);
 void kitty_dcs_dispatch(struct terminal_t *term, const char *body);
 bool kitty_ph_feed(struct terminal_t *term, uint32_t code);
 void kitty_ph_newline(struct terminal_t *term);

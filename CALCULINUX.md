@@ -127,9 +127,9 @@ battery right. `term_init` shrinks the grid by
   path is untouched. FB type shapes live in `fb/fb.h` (definitions-free,
   so `status.c` can see them without dragging in the one-TU fb backend).
 
-## Image protocols (sixel / kitty DCS / iTerm2)
+## Image protocols (sixel / kitty DCS)
 
-Three image paths land on the same sparse per-cell pixmaps, so scroll/erase/
+Two image paths land on the same sparse per-cell pixmaps, so scroll/erase/
 alt-screen/VT-deactivate behave identically for all of them:
 
 - Sixel (DCS 62 t): long-standing path, unchanged (`sixel_canvas.c`,
@@ -172,32 +172,31 @@ alt-screen/VT-deactivate behave identically for all of them:
     reserved palette slots 254/255 so ids survive unquantized (those slots
     shadow two palette grays while the dynamic colour is in effect);
     zlib/SHM/file payloads are declined politely; no file/t= transport.
-- **iTerm2 graphics (OSC 1337 `File ;`)** — the third transport, sharing
-  `raw_expand`/`png_decode` with the DCS path:
-  - `File ;` transfer only: raw BGR/BGRA (byte order per the protocol) and PNG.
-    `w=/h=` are mandatory for raw streams; PNG natural size is trusted over any
-    claimed `w=/h=`. Channel count (3 vs 4) is inferred from the byte count.
-  - `Image ;` operators (chunked upload, query, delete, resize, ...) are not
-    implemented: every one is answered `ESC ]1337 ; Rep ; i=<id> ; ok=false ;
-    t=<reason> BEL` so probing clients degrade to text rather than hanging.
+- **iTerm2 graphics (OSC 1337) — deliberately unsupported.** An early `File ;`
+  / `Image ;` decoder lived here alongside the DCS path, but its raw-BGR +
+  `t=` flavour was a product-invented dialect with no external emitter to
+  validate it against (ratatui-image's iTerm2 backend sends PNG, real iTerm2
+  is never a peer on this bare-metal deployment), and it carried no pixel-level
+  test grounding. The decoder was removed rather than shipped unverified;
+  OSC 1337 input is now consumed and ignored like any unhandled OSC.
 
 Shared placement for all image paths:
-- Budgets: decoded image capped at `KITTY_MAX_PIXELS` (512x512) and payload at
-  ~8 MB; over-budget transfers are dropped with a stderr note, screen untouched.
+- Budgets: decoded images are capped at `KITTY_MAX_PIXELS` (512x512); an
+  over-capacity DCS transfer poisons its transfer state and dies with an error
+  reply, screen untouched.
 - Anchors at the cursor and fits (nearest-neighbour, aspect preserved by
-  default, `a=no` for 1:1+crop on the OSC path) into the region to the grid
-  edges; it never scrolls. On the OSC path the cursor ends at column 0 of the
-  first row below the image; the DCS path uses the spec's right/down epilogue.
+  default) into the region to the grid edges; it never scrolls. The DCS path
+  uses the spec's right/down epilogue.
 - Alpha composites over the current background colour when the payload has one
-  (the DCS `t=d` flag and the OSC `t=yes`); cells have no alpha channel of
-  their own, unfilled sub-cell fringe stays black (parity with sixel).
+  (the DCS fourth channel); cells have no alpha channel of their own, unfilled
+  sub-cell fringe stays black (parity with sixel).
 
 PNG is optional (system libpng, high-level `png_image` API only). The makefile
 prefers an explicit `HAVE_PNG=1/0`, then `PNG_CFLAGS`/`PNG_LIBS` hints (the
 cross recipe forwards pkg-config output), otherwise it probes the toolchain for
 the `png_image` entry points. Without libpng the binary builds and runs, and
-PNG payloads (DCS f=100 and OSC `File ;`) are dropped with a note; raw pixel
-transfers on every path and the Image/Rep path are unaffected.
+PNG payloads (DCS f=100) are dropped with a note; raw pixel transfers are
+unaffected.
 
 ## Build / test
 

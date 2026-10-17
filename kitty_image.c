@@ -1,21 +1,18 @@
 /*
  * Kitty graphics protocol (Calculinux/cruft).
  *
- * Second image path next to sixel. Two entrance grammars share the
- * transfer engine:
+ * Second image path next to sixel: the kitty graphics protocol proper
+ * (kitten icat, catimg, chafa -O kitty, ratatui-image):
+ *     ESC + ... / ESC _ G ... ; PAYLOAD ST
+ * with the spec's key=value control data. Raw pixel formats honour the
+ * spec byte order (f=24/34 RGB, f=32 RGBA, f=33 BGRA, f=35 BGR;
+ * kg_format()); PNG (f=100) only when built against the system libpng,
+ * see makefile. Compression (o=z) is refused with a clean ENOSYS reply.
  *
- *   1. The kitty graphics protocol proper (kitten icat, catimg, chafa
- *      -O kitty, ratatui-image):  ESC + ... / ESC _ G ... ; PAYLOAD ST
- *      with the spec's key=value control data. Raw pixel formats
- *      honour the spec byte order (f=24/34 RGB, f=32 RGBA,
- *      f=33 BGRA, f=35 BGR; kg_format()); PNG (f=100) only when
- *      built against the system libpng, see makefile. Compression
- *      (o=z) is refused with a clean ENOSYS reply.
- *   2. Legacy OSC 1337 "File;" / "Image;" (iTerm2-style): raw BGR/BGRA
- *      pixels (this byte order, plus the t= blending key, is a product
- *      extension, not iTerm2's documented grammar) optionally
- *      base64-encoded, or PNG as above.
- *
+ * The former second entrance (legacy OSC 1337 "File;" / "Image;", an
+ * iTerm2-style raw BGR + t= dialect) was removed: it was a product-
+ * invented flavour with no external emitter to test it against. OSC
+ * 1337 input is now consumed and ignored like any unhandled OSC.
  * Placements land on the same sparse per-cell pixmaps as sixel
  * (erase_cell + cell_pixmap_ensure + the sixel_copy2cell-style
  * right-edge-clipped copy loop), so scroll/erase/alt-screen/VT-deactivate
@@ -24,11 +21,6 @@
  * the cursor to the grid edges; they never scroll the screen. Cell
  * pixmaps store 0x00RRGGBB like sixel.
  *
- * Image ; operators (chunked upload, query, delete, ...) are not
- * implemented: every one of them is answered with a terse
- *     ESC ] 1337 ; Rep ; i=<id> ; ok=false ; t=<reason> BEL
- * so probing clients degrade to text instead of blocking on a reply that
- * never comes.
  */
 #define CRUFT_NO_GLOBALS
 #include "cruft.h"
@@ -53,12 +45,7 @@ void cr(struct terminal_t *term);
  * terminal size; raw payloads need their own gate).
  */
 #define KITTY_MAX_PIXELS 262144u
-/* Payload gate before base64 expansion: ~8 MB (1 MB RGBA raw -> 1.37 MB b64). */
-#define KITTY_MAX_PAYLOAD (8u * 1024u * 1024u)
-#define KITTY_TRANSFER_ID_MAX 60
-#define KITTY_MAX_FIELDS 16
 
-static const uint8_t png_magic[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
 
 static int b64_val(int c)
 {
@@ -137,196 +124,6 @@ int kitty_base64_decode(const char *in, size_t len, uint8_t *out, size_t cap, si
  * base64 payload that merely *begins* with a key letter (e.g. PNGs
  * start with "iV...") is still classified as data.
  */
-static int key_identify(const char *k, size_t klen)
-{
-	if (klen == 1)
-		return strchr("fwhabtdimsqs", k[0]) ? tolower((unsigned char) k[0]): -1;
-	if (klen >= 2 && klen <= 12) {
-		static const char *names[] = {
-			"file", "width", "height", "asp", "aspectratio", "aspect",
-			"base64", "transparency", "data", "id", "method", "quality",
-			"signal",
-		};
-		char lc[13];
-
-		for (size_t i = 0; i < klen; i++)
-			lc[i] = (char) tolower((unsigned char) k[i]);
-		for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
-			if (klen == strlen(names[i]) && strncmp(lc, names[i], klen) == 0)
-				return (int) names[i][0];
-	}
-	return -1;
-}
-
-/* Decimal digits only (protocol integers); rejects sign/overflow/empties. */
-static int parse_uint(const char *v, size_t vlen, unsigned long *out)
-{
-	unsigned long r = 0;
-
-	if (vlen == 0 || vlen > 9)
-		return -1;
-	for (size_t i = 0; i < vlen; i++) {
-		if (!isdigit((unsigned char) v[i]))
-			return -1;
-		r = r * 10 + (unsigned long) (v[i] - '0');
-	}
-	*out = r;
-	return 0;
-}
-
-/* yes/true/1/y -> 1, no/false/0/n -> 0, case-insensitive. */
-static int parse_flag(const char *v, size_t vlen, int *out)
-{
-	static const struct {
-		const char *word;
-		int val;
-	} tbl[] = {
-		{ "yes", 1 }, { "true", 1 }, { "1", 1 }, { "y", 1 },
-		{ "no", 0 }, { "false", 0 }, { "0", 0 }, { "n", 0 },
-	};
-	char lc[8];
-
-	if (vlen == 0 || vlen > 7)
-		return -1;
-	for (size_t i = 0; i < vlen; i++)
-		lc[i] = (char) tolower((unsigned char) v[i]);
-	for (size_t i = 0; i < sizeof(tbl) / sizeof(tbl[0]); i++)
-		if (vlen == strlen(tbl[i].word) && strncmp(lc, tbl[i].word, vlen) == 0) {
-			*out = tbl[i].val;
-			return 0;
-		}
-	return -1;
-}
-
-int kitty_args_parse(const char *payload, struct kitty_args *ka)
-{
-	const char *fields[KITTY_MAX_FIELDS];
-	size_t flen[KITTY_MAX_FIELDS];
-	int nf = 0;
-	const char *p;
-
-	if (!payload || !ka)
-		return -1;
-	*ka = (struct kitty_args) {
-		.action = NULL, .data = NULL, .data_len = 0,
-		.width = -1, .height = -1,
-		.preserve_aspect = 1, .base64 = 1, .transparency = 0,
-		.id = NULL, .id_len = 0,
-		.method = NULL, .method_len = 0,
-	};
-
-	/*
-	 * Slice on ';' without mutating the caller's buffer (parse_arg's
-	 * in-place NUL splitting is what keeps 1337 out of the ordinary
-	 * OSC path). Every recognised key - single-letter or full word -
-	 * starts with a distinct letter, so the first letter identifies
-	 * the key. The LAST field is data unless its key is recognised
-	 * (base64 padding puts '=' inside the payload).
-	 */
-	p = payload;
-	while (*p) {
-		const char *semi = strchr(p, ';');
-		size_t l = semi ? (size_t) (semi - p): strlen(p);
-
-		if (nf >= KITTY_MAX_FIELDS)
-			return -1;
-		fields[nf] = p;
-		flen[nf] = l;
-		nf++;
-		if (!semi)
-			break;
-		p = semi + 1;
-	}
-	if (nf == 0)
-		return -1;
-
-	if (flen[0] == 4 && strncmp(fields[0], "File", 4) == 0)
-		ka->action = "File";
-	else if (flen[0] == 5 && strncmp(fields[0], "Image", 5) == 0)
-		ka->action = "Image";
-	else
-		return -1;
-
-	for (int i = 1; i < nf; i++) {
-		const char *f = fields[i];
-		const char *eq = (const char *) memchr(f, '=', flen[i]);
-		const char *value = NULL;
-		size_t vlen = 0;
-		int key;
-
-		if (eq) {
-			size_t klen = (size_t) (eq - f);
-
-			key = key_identify(f, klen);
-			if (i == nf - 1 && key < 0) {
-				/* last field, unrecognised key: the payload
-				 * (base64 padding may put '=' inside it) */
-				ka->data = f;
-				ka->data_len = flen[i];
-				continue;
-			}
-			if (key < 0)
-				continue; /* forward-compat: unknown key */
-			value = eq + 1;
-			vlen = flen[i] - klen - 1;
-		} else {
-			if (i != nf - 1)
-				return -1; /* key without '=' only legal as final data */
-			ka->data = f;
-			ka->data_len = flen[i];
-			continue;
-		}
-
-		switch (key) {
-		case 'w':
-			if (parse_uint(value, vlen, (unsigned long *) &ka->width) < 0)
-				return -1;
-			if (ka->width > 65535)
-				return -1;
-			break;
-		case 'h':
-			if (parse_uint(value, vlen, (unsigned long *) &ka->height) < 0)
-				return -1;
-			if (ka->height > 65535)
-				return -1;
-			break;
-		case 'a':
-			if (parse_flag(value, vlen, &ka->preserve_aspect) < 0)
-				return -1;
-			break;
-		case 'b':
-			if (parse_flag(value, vlen, &ka->base64) < 0)
-				return -1;
-			break;
-		case 't':
-			if (parse_flag(value, vlen, &ka->transparency) < 0)
-				return -1;
-			break;
-		case 'd': /* data= (explicit; the implicit tail still wins if given) */
-			ka->data = value;
-			ka->data_len = vlen;
-			break;
-		case 'i':
-			ka->id = value;
-			ka->id_len = vlen;
-			break;
-		case 'm':
-			ka->method = value;
-			ka->method_len = vlen;
-			break;
-		default:
-			/* f(ile name), q(uality), s(ignal): accepted, unused */
-			break;
-		}
-	}
-
-	/* data is mandatory for File; Image operations (query, delete, ...)
-	 * carry none. */
-	if (strcmp(ka->action, "File") == 0 && (!ka->data || ka->data_len == 0))
-		return -1;
-	return 0;
-}
-
 /* TRUE only when built against libpng: the makefile probe verified both
  * the header and the high-level png_image API symbols, so no further
  * feature-testing is needed (plain libpng 1.6 ships it unconditionally). */
@@ -597,182 +394,6 @@ static void kitty_paint_core(struct terminal_t *term, const uint32_t *img,
 	*p_cols = cols;
 }
 
-/*
- * Place at the cursor and park it at column 0 of the first row below the
- * image (the legacy OSC 1337 behaviour the selftests pin down).
- */
-static void kitty_place(struct terminal_t *term, const uint32_t *img, int tw, int th)
-{
-	int lines, cols;
-
-	kitty_paint_core(term, img, tw, th, &lines, &cols);
-	if (lines < 1)
-		return;
-	if (active_screen(term)->cursor.y + lines < term->lines)
-		move_cursor(term, lines, 0);
-	else
-		set_cursor(term, term->lines - 1, 0);
-	cr(term);
-}
-
-static void kitty_file_render(struct terminal_t *term, const struct kitty_args *ka)
-{
-	uint8_t *raw = NULL;
-	uint32_t *img = NULL;
-	uint32_t bg;
-	struct screen_t *scr;
-	size_t raw_cap, raw_len = 0;
-	int is_png, x0, y0, aw, ah, sw, sh, tw = 0, th = 0;
-
-	if (!term)
-		return;
-	scr = active_screen(term);
-	if (!scr->cells)
-		return;
-	if (ka->data_len > KITTY_MAX_PAYLOAD) {
-		fprintf(stderr, "cruft: kitty_image: payload exceeds %u KB budget\n",
-			KITTY_MAX_PAYLOAD / 1024u);
-		return;
-	}
-
-	/* decoded base64 (<= 3/4 * len) or the literal payload alike */
-	raw_cap = ka->data_len + (ka->data_len / 4) + 4;
-	raw = (uint8_t *) malloc(raw_cap);
-	if (!raw) {
-		fprintf(stderr, "cruft: kitty_image: alloc failed\n");
-		return;
-	}
-	if (ka->base64) {
-		if (kitty_base64_decode(ka->data, ka->data_len, raw, raw_cap, &raw_len) < 0) {
-			fprintf(stderr, "cruft: kitty_image: bad base64 payload\n");
-			goto out;
-		}
-	} else {
-		memcpy(raw, ka->data, ka->data_len);
-		raw_len = ka->data_len;
-	}
-
-	is_png = (raw_len >= sizeof(png_magic) &&
-		  memcmp(raw, png_magic, sizeof(png_magic)) == 0);
-	bg = term->virtual_palette[term->color_pair.bg];
-	x0 = scr->cursor.x * CELL_WIDTH;
-	y0 = scr->cursor.y * CELL_HEIGHT;
-	/* cell-grid pixel space, not the full framebuffer (see png_decode) */
-	aw = term->cols * CELL_WIDTH - x0;
-	ah = term->lines * CELL_HEIGHT - y0;
-	if (aw < 1 || ah < 1)
-		goto out; /* cursor outside the grid: nothing to anchor to */
-
-	if (is_png) {
-		/* cppcheck sees the HAVE_LIBPNG branch: the note path is
-		 * dead there, live in no-libpng builds */
-		// cppcheck-suppress knownConditionTrueFalse
-		if (!kitty_png_available()) {
-			fprintf(stderr,
-				"cruft: kitty_image: PNG payload dropped (built without libpng)\n");
-			goto out;
-		}
-		/* png_decode() is a constant -1 in no-libpng builds: same
-		 * knownConditionTrueFalse as the availability note above */
-		// cppcheck-suppress knownConditionTrueFalse
-		if (png_decode(raw, raw_len, term, ka->transparency, bg, &tw, &th, &img) < 0)
-			goto out;
-		goto place;
-	}
-
-	/* raw BGR / BGRA: w/h are mandatory for raw streams */
-	sw = (int) ka->width;
-	sh = (int) ka->height;
-	if (sw < 1 || sh < 1) {
-		fprintf(stderr, "cruft: kitty_image: raw payload needs w/h\n");
-		goto out;
-	}
-	if ((unsigned long long) sw * (unsigned long long) sh > KITTY_MAX_PIXELS) {
-		fprintf(stderr, "cruft: kitty_image: image exceeds %u px budget\n",
-			KITTY_MAX_PIXELS);
-		goto out;
-	}
-	if (raw_len < (size_t) sw * sh * 3) {
-		fprintf(stderr, "cruft: kitty_image: payload size does not match w/h\n");
-		goto out;
-	}
-
-	kitty_fit(sw, sh, aw, ah, ka->preserve_aspect, &tw, &th);
-	img = (uint32_t *) malloc((size_t) tw * (size_t) th * BYTES_PER_PIXEL);
-	if (!img) {
-		fprintf(stderr, "cruft: kitty_image: alloc failed\n");
-		goto out;
-	}
-	raw_expand(raw, sw, sh,
-		   (raw_len >= (size_t) sw * sh * 4) ? 4u: 3u,
-		   0, ka->transparency, bg, tw, th, img);
-
-place:
-	kitty_place(term, img, tw, th);
-out:
-	free(raw);
-	free(img);
-}
-
-/*
- * Polite Image ; operator: cruft keeps no registered images and does not
- * assemble chunked uploads, so every Image operation gets ok=false with a
- * reason. Rep grammar: OSC 1337 ; Rep ; i=<id> ; ok=false ; t=<reason> BEL.
- */
-/* Length-bounded compare (members of struct kitty_args are slices of the
- * payload, not NUL-terminated). */
-static int kv_eq(const char *s, size_t n, const char *lit)
-{
-	return n == strlen(lit) && memcmp(s, lit, n) == 0;
-}
-
-static void kitty_image_reply(struct terminal_t *term, const struct kitty_args *ka)
-{
-	char buf[256];
-	const char *reason;
-	int n, idlen;
-
-	if (!ka->method || ka->method_len == 0)
-		reason = "invalid_arguments";
-	else if (kv_eq(ka->method, ka->method_len, "query")
-		 || kv_eq(ka->method, ka->method_len, "delete")
-		 || kv_eq(ka->method, ka->method_len, "move")
-		 || kv_eq(ka->method, ka->method_len, "resize")
-		 || kv_eq(ka->method, ka->method_len, "rotate")
-		 || kv_eq(ka->method, ka->method_len, "crop"))
-		reason = "not_found";
-	else /* new / update / unrecognised: nothing to fulfil either */
-		reason = "failed";
-
-	n = snprintf(buf, sizeof(buf), "\033]1337;Rep;");
-	idlen = (int) ka->id_len;
-	if (idlen > KITTY_TRANSFER_ID_MAX)
-		idlen = KITTY_TRANSFER_ID_MAX;
-	if (idlen > 0)
-		n += snprintf(buf + n, sizeof(buf) - (size_t) n, "i=%.*s;", idlen, ka->id);
-	n += snprintf(buf + n, sizeof(buf) - (size_t) n, "ok=false;t=%s", reason);
-	buf[n] = BEL;
-
-	/* One small write to the pty master; the standalone TU must not
-	 * pull the unity-built util.h (ewrite) into a second object. */
-	if (n >= 0 && write(term->fd, buf, (size_t) n + 1) < 0)
-		fprintf(stderr, "cruft: kitty_image: Rep reply write failed: %s\n",
-			strerror(errno));
-}
-
-void kitty_image_dispatch(struct terminal_t *term, const char *payload)
-{
-	struct kitty_args ka;
-
-	if (!term || !payload || !*payload)
-		return;
-	if (kitty_args_parse(payload, &ka) < 0)
-		return; /* malformed: drop silently, matches DCS behaviour */
-	if (strcmp(ka.action, "File") == 0)
-		kitty_file_render(term, &ka);
-	else
-		kitty_image_reply(term, &ka);
-}
 
 /* =====================================================================
  * Kitty graphics transfer protocol (APC _G / DCS +)

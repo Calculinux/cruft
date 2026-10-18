@@ -52,6 +52,11 @@ Issues filed in the course of this phase:
   visible runtime checks.
 - **Guest pty-EIO (forkpty-on-target)** — reclassified as a guest
   harness limitation from Phase 1, not a product defect; parked.
+- **"U=1 no-render" — STRUCTURALLY ELIMINATED.** The missing image
+  placement was pty carrier corruption of the transfer bytes in
+  transit; the L2b write-boundary tee (§8) takes the authority bytes
+  before the kernel touches them, so the pty can no longer corrupt
+  anything the tests consume. Closed without product change.
 
 ## 3. External-authority audit — ratatui-image
 
@@ -177,21 +182,28 @@ resurrected half-tested. libpng retained (feeds the DCS f=100 path).
   chunked transfer, placeholder display, `a=p` re-place, `a=d` delete,
   direct placement); K/M/Q sixel core. Tamper detection: any golden
   mismatch fails the suite with a per-scene diff summary.
-- **L2a goldens** (`tests/golden_main.c` + `tests/goldens/`), 3 scenes,
-  byte-frozen with external authority labels in their headers:
-  `sixel-quadrants.frame` (409 600 B), `kitty-composite.frame` +
-  `kitty-composite.reply` (96 B probe/transfer replies),
-  `halfblocks-utf8.frame` — all on the vendored 6×12 console font
+- **Golden-pixel suites** (`tests/golden_main.c` + `tests/goldens/`),
+  5 scenes, byte-frozen with external authority labels in their
+  headers: L2a's `sixel-quadrants.frame` (409 600 B),
+  `kitty-composite.frame` + `kitty-composite.reply` (96 B
+  probe/transfer replies), `halfblocks-utf8.frame` — all on the
+  vendored 6×12 console font
   (`tests/assets/console-6x12.cruftfont`, sha256-pinned, rebuilt
-  byte-identically from the pinned Terminus/Fairfax sources).
-- Status: `make test` and `make lint` green; goldens byte-identical
-  before/after the 1337 removal.
+  byte-identically from the pinned Terminus/Fairfax sources) — plus
+  the L2b `kitty-applive` trio (application-scale real-emitter
+  capture; §8) and the `sixel-icy-overlay` scene (icy_sixel-shaped
+  traffic, DCS + frame frozen, no replies).
+- **L2b live driver** (`tests/apptest` + `tests/l2b/`): optional
+  target, deliberately outside `make test`; `make apptest-live` runs
+  the check-mode verification against the frozen trio (§8).
+- Status: `make test` and `make lint` green across all five scenes;
+  the three L2a goldens are byte-identical canaries across the L2b
+  round (verified by hash before/after the refreeze sweep).
 
-Known residual gaps (**L2b**, defined, not started):
-1. A chunked `f=32` RGBA transfer + unicode-placeholder-display pixel
-   golden at application scale (the actual ratatui traffic class — §3.2),
-   driven by the real emitter under a host pty with a prebuilt
-   ratatui-image test asset.
+Residual gaps:
+1. ~~Application-scale `f=32` RGBA golden driven by the real
+   ratatui-image asset~~ — **DONE, §8** (`kitty-applive` trio,
+   write-boundary capture on a real pty).
 2. A palette-heavy sixel scene (multi-layer `#P` + `$` overlays,
    icy_sixel-shaped traffic) frozen by golden.
 3. Real-app guest run for photographic confirmation — deferred to the
@@ -209,3 +221,197 @@ Known residual gaps (**L2b**, defined, not started):
   stacked/alpha compositing; `a=d` accepts the delete-key letter set
   as a polite subset; `U=1` placeholder machinery present and exercised
   in W.
+- The L2b round (below) filed **no** issues: every failure
+  encountered in it rooted in the new harness (own bugs, listed in
+  §8.6) or in a harness assumption (fake-tty route), never in a
+  product-vs-authority disagreement.
+
+## 8. L2b: the application-scale golden (write-boundary capture)
+
+The real `ratatui-image` asset (pinned rev `a08dc3c`, v12.0.0-rc.2;
+crossterm 0.29.0; prebuilt binary, `cargo build` via
+`make apptest-asset`, not committed) runs against the in-process
+product and freezes the `kitty-applive` golden trio
+(trace / reply / frame), which `tests/golden` thereafter replays
+dependency-free (no app, no pty, no cargo).
+
+### 8.1 The pty is lossy in transit (empirical)
+
+With the app on a real pty and the master read side tapped: the
+incoming stream is the app's exact protocol traffic interleaved with
+heavy NUL floods whose volume varies run to run (observed 163 KB and
+364 KB of NULs around the identical 32 711 B of protocol bytes, same
+run shape). Measured at the write boundary via the shim's logger
+(§8.3), the app issued exactly eight `write()` calls to its stdout,
+total 32 711 B, **zero NULs**. Conclusion: the line discipline/carrier
+destroys bytes in transit; the pty read side is *not* the authority
+for what the app authored. The pty therefore serves only as a
+delivery duct (product replies → master → app; app's outgoing pty
+traffic drained and discarded).
+
+### 8.2 The fake-tty route (dead end, proven from source)
+
+Investigated first: give the app a tty *interface* without a kernel
+tty (pipes + `LD_PRELOAD` termios emulation). Killed by the pinned
+sources: `picker.rs` (rev `a08dc3c`) calls `enable_raw_mode()`
+(unix, ~:383–404) **unconditionally** from `query_with_timeout`
+(~:525–565) — no isatty gate — and `enable_raw_mode` calls
+`rustix::termios::tcgetattr(stdin)` / `tcsetattr` directly. rustix
+issues raw syscalls, which no `LD_PRELOAD` can interpose (PRELOAD
+hooks libc PLT symbols only); on a pipe fd the raw `tcgetattr` fails
+ENOTTY and the app dies before its probe window. crossterm 0.29.0's
+unix backend routes termios through rustix by default; its `libc`
+feature would flip to hookable calls but is off, and it is a knob of a
+dependency we do not own — flipping it would tune a dependency to suit
+the harness. Verdict: the terminal must be genuine. The faketty
+prototype's remaining value (the app's full tty-surface map) is
+banked here and the `.so` was deleted.
+
+### 8.3 Architecture: real pty + in-tree write-tee shim
+
+- **Driver** (`tests/apptest.c`): `posix_openpt`/`grantpt`/`unlockpt`/
+  `ptsname`; `TIOCSWINSZ` 53×26 cells @ 320×320 px (product geometry);
+  the app child does `setsid()` + `TIOCSCTTY`, slave on fd 0/1, stderr
+  inherited (app diagnostics stay out of the frozen record); minimal
+  env (`TERM`, `PATH`, `LD_PRELOAD` — host env can carry
+  `WEZTERM_EXECUTABLE`/`KONSOLE_VERSION`, which the picker blacklists).
+  Three-lane pump: reply pipe (product → pty master → app), the tee
+  (authority capture, fed live into the product's real `parse()`), and
+  the master read side (drained, discarded).
+- **Shim** (`tests/l2b/writetee.so`, own, built in-tree): hooks
+  `write()` only; a call qualifies iff its fd is the app's stdout —
+  recognised by *file identity* (fd 1, or any fd with the same
+  `(st_dev, st_ino)`, which covers the app's `/dev/tty` aliases), not
+  number alone. Qualifying writes are mirrored byte-for-byte, in call
+  order, onto an inherited pipe end (`TEE_FD` 7) **before** the real
+  write proceeds. `SIGPIPE` ignored; an env-gated diagnostic logger
+  (`CRUFT_TEE_LOG`, dormant by default) records per-call
+  fd/length/zero-count/header — the instrument that settled §8.1.
+  Built without `-pedantic` (the `dlsym` object→fnptr casts are
+  ISO-UB; commented in the makefile).
+- **Why own (OSS survey)**: no maintained recorder captures fd
+  *writes* of one designated process; strace (absent here; text
+  output), ltrace (unhealthy on this toolchain), eBPF/auditd/perf
+  (privilege) do not fit a CI-capable in-tree test;
+  `utempter`/`script`/tmux/dtach/abduco record the pty **read** side or
+  screen state — precisely the lossy surface escaped here.
+  Differentiators: binary-safe, single ordered record per call, zero
+  provisioning, single-fd scope, verified against the pinned app.
+
+### 8.4 The assertion ladder (in firing order)
+
+1. app exits 0 (its happy path is part of the contract — it selects
+   Kitty, promotes, transfers, draws, exits);
+2. **NUL-free capture** — a true invariant of the tee stream; a
+   violation is an environment regression and fails loudly. The
+   pty-era repair machinery (NUL-stripping, banded dynamic-programming
+   re-sync, ideal substitution) is retired wholesale: with clean
+   authority bytes there is nothing to repair, and sanitising would
+   be inventing semantics;
+3. **shape**: the `i=31` probe APC intact + exactly eight `q=2`
+   transfer chunks (the `a=q` probe is deliberately never rewritten);
+4. **payload, zero budget**: each chunk's payload byte-compared
+   against the independently recomputed ideal
+   `tests/l2b/asset/img/apptest-100x60.b64` (32 000 B) —
+   byte-identical or fail;
+5. **canonicalisation** (the single permitted transform, and it is
+   pinning, not invention): the client-random transfer id (varies per
+   run) → `32`, applied to the three carriers — transfer-header
+   `i=`, placeholder SGR truecolour `38;2;H;L;LO` → `38;2;0;0;32`,
+   and the high-byte diacritic `kg_diacc[H]` → `kg_diacc[0]`. The
+   canonical trace/reply/frame is thus byte-stable across runs while
+   the live exchange stays verbatim-real;
+6. **replay**: the product re-parses the canonical trace through the
+   same in-process tier-1 path in 333-byte deliberately misaligned
+   bites (rechecks split-independence against the live pipe-fed
+   stream); the live reply (its id-echoes canonicalised the same way)
+   must equal the replay's reply byte-for-byte;
+7. **freeze + re-verify**: the trio is frozen and re-read back;
+   `tests/golden` then replays the frozen trace with no app, no pty
+   and no cargo, and must reproduce the frozen reply and frame
+   (verified: byte-identical to the live freeze, by hash).
+
+### 8.5 Geometry and anchoring facts (verified against the bytes)
+
+- Chunking: seven full 4096-char b64 chunks + a 3328-char tail =
+  32 000 — agrees with the pinned emitter's audit (§3.2,
+  `kitty.rs:432–436`).
+- `c=17`/`r=5` in the transfer header are **dimension** parameters
+  (17 cells × 5 rows), not an anchor — verified: the stored image is
+  composited at the *placeholder* top-left, and the placeholder block
+  the app drew (VT row 5, col 7, 0-based 4,6) spans exactly 17×5
+  cells.
+- The 100×60 px image fits the 102×60 px cell box at scale 1 with a
+  1 px centring margin; rendered origin is px **(37,48)**.
+- Frame verification: **6 000/6 000 pixels exact (TOL 0)** against
+  the source PNG RGBA — lossless end-to-end (PNG → app decode →
+  raw RGBA → b64 → product decode → composite).
+- Frozen reply is exactly **54 B**: `ESC[1;1R` (CPR) ·
+  `ESC _ G i=31;OK ST` (probe) · `ESC [ ? 6 2 ; 4 ; 6 c` (DA1) ·
+  `ESC [ 1 6 ; 1 2 ; 6 t` (cell size, pixels) · `ESC [ 0 n` (SDS
+  sentinel) · `ESC _ G i=32;OK ST` (transfer ack, id pinned).
+- Determinism: two successive check-mode runs with different
+  client-random ids (e.g. `0xff3de49f`, `0x062ceeac`) produced
+  byte-identical canonical artefacts — the goldens hold across the
+  id's randomness by construction.
+
+### 8.6 Banked traps and self-inflicted bugs (all in the harness)
+
+Each cost iterations; listed so the next round does not repay them.
+
+1. **`setsid()` returns the new session id on success** — test `< 0`,
+   not `!= 0`. Misread, it forks the proxy unnecessarily and the
+   grandchild `_exit(126)` reads as a mysterious app death.
+2. **`dup2()` returns the *new* fd on success** — test `< 0`.
+   Misread as `!= 0`, the `dup2(slave, 1)` success (return 1) fired a
+   spurious sentinel; the recorded `errno=22` was *stale* (a benign
+   failed `readlink` on `.` inside `/proc/self/fd` during
+   diagnostics), which masked the true cause for a full hunt. Slots
+   0-masked the same check trivially (dup2 to fd 0 returns 0).
+3. **x86 ioctl constants on this host** (faketty era):
+   `TCGETS=0x5401`, `TCSETS=0x5402`, `FIONBIO=0x5421`,
+   `TIOCNOTTY=0x5422`, `TCGETS2=0x3C542A`, `TCSETS2=0x3C542B`; glibc
+   here has no `struct termios2`; the std readline `read_output`
+   ioctl slot is 4 bytes (a 60-byte termios write segfaulted the app
+   against it).
+4. **Size/capacity conflation in the accumulator** (`grow()`): the
+   helper wrote its new *capacity* back into the caller's *size*
+   variable, so every append jumped ahead by a doubling — the record
+   ballooned into zero-filled deserts around the real 32 KB (volume
+   nondeterministic, proportional to pipe partitioning). Same family:
+   `drain_pipe` copied to the post-growth size and then advanced the
+   size again. Fix: explicit capacity ownership; callers own size.
+5. **ST double-subtraction** (`apc_body_at`): the terminator finder
+   returns a pointer *at* the ST's `ESC`, so `[start, end)` already
+   excludes it; an extra `−2` trimmed the last two payload bytes of
+   **every** chunk (deterministic 4096→4094).
+6. **Emitted introducer truncated** (`cb_emit("\x1b_G", 2)`): the
+   literal is 3 bytes (`ESC _ G`); length 2 dropped the `G`, so every
+   canonicalised transfer APC lost its introducer byte. The product
+   then *correctly* declined to form a DCS from `ESC _ q…` and stayed
+   silent under `q=2` — surfacing as "canonical replay misses the
+   transfer ack" while raw replay acked. **Not a product defect**:
+   the product behaved correctly against the malformed stream the
+   emitter manufactured. Caught by an independent (non-C) parser over
+   the frozen bytes plus raw-vs-canonical A/B replays.
+7. **Phantom-nondeterminism lesson**: an apparent chunk-split variance
+   (4094 vs 4096 "between runs") was the parser pair diverging (trap
+   5), not app jitter. Rule adopted: before attributing variance to
+   app or environment, diff two independent parsers of the same
+   bytes.
+
+### 8.7 Artefacts
+
+- `tests/apptest.c` — live driver (pty + tee pump + assertion ladder).
+- `tests/l2b/writetee.c` (→ `.so`) — the shim; makefile rule keeps it
+  out of `-pedantic` with the reason commented.
+- `tests/l2b/asset/` — pinned Cargo project (ratatui-image `a08dc3c`,
+  crossterm 0.29.0, lockfile committed; `target/` ignored) +
+  `img/apptest-100x60.png` (source image) and
+  `img/apptest-100x60.b64` (the independent 32 000 B ideal payload).
+- `tests/goldens/kitty-applive.{trace,reply,frame}` — 32 694 B /
+  54 B / 409 600 B; plus the `sixel-icy-overlay.{dcs,frame,reply}`
+  scene frozen in the same sweep; L2a goldens byte-unchanged.
+- Diagnostic dumps (best-effort, `/tmp/apptest-debug.*`) are written
+  beside each ladder rung that fails, so any future regression
+  presents its own evidence.

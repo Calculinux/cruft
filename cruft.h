@@ -319,6 +319,7 @@ void sixel_copy2cell(struct terminal_t *term, struct sixel_canvas_t *sc);
 
 /* kitty_image.c */
 int kitty_base64_decode(const char *in, size_t len, uint8_t *out, size_t cap, size_t *out_len);
+const uint32_t *kitty_diac_table(void);
 bool kitty_png_available(void);
 void kitty_dcs_dispatch(struct terminal_t *term, const char *body);
 bool kitty_ph_feed(struct terminal_t *term, uint32_t code);

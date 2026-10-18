@@ -1,0 +1,29 @@
+# Sixel reference-stream generator for the sixel-icy-overlay golden.
+#
+# Emits the byte stream produced by the icy_sixel encoder that
+# ratatui-image's sixel path delegates to, for a fixed 20x20 RGBA
+# pattern with overlapping colour layers (forces a multi-entry
+# percent-RGB palette, '$' layer resets and '!' runs in the output).
+#
+# Pinned by git rev = the exact commit the authority audit in
+# REPORT.md read:
+#   18a36d36c186db94cdcea7dcddbdcbc6d659da8a (icy_sixel 0.7.x line)
+#
+# Regenerate the committed golden input:
+#   cargo run --release --manifest-path tests/l2b/sixgen/Cargo.toml \
+#     > tests/goldens/sixel-icy-overlay.dcs
+#
+# This is deliberately NOT wired into `make test`: the committed .dcs
+# file is the authority artefact; the generator exists so anyone can
+# prove where those bytes came from.
+[package]
+name = "sixgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+icy_sixel = { git = "https://github.com/mkrueger/icy_sixel", rev = "18a36d36c186db94cdcea7dcddbdcbc6d659da8a" }
+
+[profile.release]
+opt-level = 2

@@ -6,3 +6,6 @@ tests/selftest-asan
 *.cruftfont
 .claude/
 tests/golden
+tests/apptest
+tests/l2b/writetee.so
+tests/l2b/*/target/

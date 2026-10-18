@@ -62,7 +62,7 @@ CLANG_TIDY ?= clang-tidy
 CPPCHECK ?= cppcheck
 SHELLCHECK ?= shellcheck
 
-.PHONY: all clean install uninstall test test-asan golden lint tidy cppcheck shellcheck check
+.PHONY: all clean install uninstall test test-asan golden lint tidy cppcheck shellcheck check apptest-live apptest-asset
 
 all: cruft mkcruftfont
 
@@ -91,6 +91,35 @@ golden: tests/golden
 tests/golden: $(GOLDEN_SRCS) $(HDR)
 	$(CC) -o $@ $(GOLDEN_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
 
+# L2b live driver: the real ratatui-image app (pinned rev; the asset
+# is built with cargo and NOT committed) runs on a real pty against
+# the in-process product; writetee.so mirrors the app's stdout
+# writes at the write boundary (the pty line discipline is
+# empirically lossy in transit - see REPORT.md) and freezes/verifies
+# the kitty-applive golden trio (trace/reply/frame) that tests/golden
+# replays dependency-free.
+# Optional: `make test` never depends on this. To refreeze the trio:
+#   ./tests/apptest --update <asset-bin> <png>
+APPT_SRCS = tests/apptest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c
+
+tests/apptest: $(APPT_SRCS) $(HDR)
+	$(CC) -o $@ $(APPT_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
+
+# LD_PRELOAD shim for the live driver's app child: mirrors every
+# write() to the app's stdout onto the capture pipe (write boundary
+# = before the kernel touches the bytes).
+tests/l2b/writetee.so: tests/l2b/writetee.c
+	# no -pedantic: the dlsym object->function-pointer casts the
+	# shim needs are ISO-UB and pedantic rejects them
+	$(CC) -shared -fPIC -O2 -std=c99 -Wall -Wextra -Werror -o $@ $<
+
+apptest-asset:
+	cargo build --release --manifest-path tests/l2b/asset/Cargo.toml
+
+apptest-live: tests/apptest tests/l2b/writetee.so apptest-asset
+	./tests/apptest tests/l2b/asset/target/release/apptest-asset \
+		tests/l2b/asset/img/apptest-100x60.png
+
 test-asan: $(SRCS) $(HDR) tests/selftest.c
 	$(CC) -o tests/selftest-asan $(TEST_SRCS) $(ASAN_CFLAGS) $(KG_PNG_CFLAGS) -I. $(ASAN_LDFLAGS) $(KG_PNG_LDFLAGS)
 	./tests/selftest-asan
@@ -101,6 +130,8 @@ lint:
 	$(CC) -fsyntax-only $(WARNFLAGS) -O2 tools/mkcruftfont.c
 	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(TEST_SRCS)
 	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(GOLDEN_SRCS)
+	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(APPT_SRCS)
+	$(CC) -fsyntax-only -std=c99 -Wall -Wextra -Werror -O2 tests/l2b/writetee.c
 
 tidy:
 	$(CLANG_TIDY) $(LINT_SRCS) -- $(WARNFLAGS) -O2 -I. $(KG_PNG_CFLAGS)
@@ -133,4 +164,4 @@ uninstall:
 	rm -f $(MANPREFIX)/man1/cruft.1
 
 clean:
-	rm -f cruft mkcruftfont tests/selftest tests/selftest-asan tests/golden
+	rm -f cruft mkcruftfont tests/selftest tests/selftest-asan tests/golden tests/apptest tests/l2b/writetee.so

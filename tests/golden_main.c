@@ -83,7 +83,10 @@ static void fail(const char *msg)
 /* stream building                                                    */
 /* ------------------------------------------------------------------ */
 
-#define MAXSTREAM 16384
+/* 256 KiB: the frozen live-app trace (kitty-applive.trace: a
+ * ~24 KB base64 payload plus the crossterm buffer traffic around
+ * it) must sit beside the hand-built scenes in the same arena. */
+#define MAXSTREAM (1u << 18)
 static uint8_t g_stream[MAXSTREAM];
 static size_t g_len;
 
@@ -397,13 +400,47 @@ static long reply_drain(int fd)
 
 struct scen {
 	const char *name;
+	/* Exactly one of the two: an inline builder, or a frozen
+	 * external stimulus file tests/goldens/<name><ext> (the L2b
+	 * tier, see the note above the table). */
 	void (*build)(void);
+	const char *ext;
 };
 
+/* L2b tier 1 (canonical, dependency-free): the last two scenarios
+ * do not build the stimulus inline — they replay a FROZEN byte
+ * stream committed next to the goldens, captured once, live, by
+ * tests/apptest (tier 2) against a real emitter. The replay below
+ * feeds it through the same parse()/refresh() path, so the frozen
+ * frame and reply are re-derivable on any host with no app, no
+ * network and no rust toolchain.
+ *
+ * kitty-applive.trace — verbatim stdout of ratatui-image v12.0.0-rc.2
+ * (a08dc3c, the asset pinned in tests/l2b/asset/): its verbatim
+ * probe batch, the negotiated KGP win, and a 100x60 RGBA image
+ * (tests/l2b/asset/img/apptest-100x60.png, deterministic
+ * gen_image.py) that the app scales to fit a 40x20-cell rect and
+ * transfers as raw f=32 in 4096-base64-char chunks, U=1 virtual
+ * placement with U+10EEEE placeholder glyphs, plus the crossterm
+ * buffer writes around it.
+ * Governance: (a) app traffic — the whole stimulus is what a real
+ * peer emits, so frame and reply must track the outside world.
+ *
+ * sixel-icy-overlay.dcs — raw icy_sixel encoder output (generator
+ * pinned in tests/l2b/sixgen/; REPORT.md sec. 3.3 audits the
+ * dialect against the product verb table) for a 20x20 five-colour
+ * image with overlapping layers: multi-entry percent palette,
+ * full-band '$' layer overlays and '!' runs — shapes the hand-built
+ * scenes never reach. Preceded here by ESC H (app-style anchor; the
+ * DCS lands at the cursor, DEC style).
+ * Governance: (a) app traffic — the emitter is the outside encoder.
+ */
 static const struct scen scens[] = {
-	{ "sixel-quadrants", build_sixel_quadrants },
-	{ "kitty-composite", build_kitty_composite },
-	{ "halfblocks-utf8", build_halfblocks_utf8 },
+	{ "sixel-quadrants", build_sixel_quadrants, NULL },
+	{ "kitty-composite", build_kitty_composite, NULL },
+	{ "halfblocks-utf8", build_halfblocks_utf8, NULL },
+	{ "kitty-applive", NULL, ".trace" },
+	{ "sixel-icy-overlay", NULL, ".dcs" },
 };
 
 static const char *g_root = ".";
@@ -439,6 +476,41 @@ static int cmp_dump(const char *what, const uint8_t *have, size_t hsz,
 	return 1;
 }
 
+/* L2b external stimulus: replay a frozen byte stream from
+ * tests/goldens/<name><ext>. The .dcs variant gets an app-style
+ * ESC H anchor in front (the DCS image lands at the cursor, DEC
+ * style). put() enforces MAXSTREAM; an oversized file is a hard
+ * abort, which is what we want for a frozen reference artefact. */
+static int load_external(const struct scen *s)
+{
+	char path[512];
+	static uint8_t buf[8192];
+	FILE *f;
+	size_t n;
+
+	g_len = 0;
+	snprintf(path, sizeof path, "%s/tests/goldens/%s%s",
+	         g_root, s->name, s->ext);
+	if (s->ext[1] == 'd')		/* .dcs: home first, then the DCS */
+		putlit("\033[H");
+	f = fopen(path, "rb");
+	if (!f) {
+		fail(s->name);
+		fprintf(stderr, "  [%s] cannot open %s\n", s->name, path);
+		return -1;
+	}
+	while ((n = fread(buf, 1, sizeof buf, f)) > 0)
+		put(buf, n);
+	if (ferror(f)) {
+		fail(s->name);
+		fprintf(stderr, "  [%s] read error on %s\n", s->name, path);
+		fclose(f);
+		return -1;
+	}
+	fclose(f);
+	return 0;
+}
+
 static int g_run_one(const struct scen *s, int update)
 {
 	struct framebuffer_t fb;
@@ -449,7 +521,12 @@ static int g_run_one(const struct scen *s, int update)
 	unsigned unpainted = 0;
 	size_t first = 0;
 
-	s->build();
+	if (s->ext) {
+		if (load_external(s) != 0)
+			return 1;
+	} else {
+		s->build();
+	}
 	if (getenv("DEBUG_STREAM")) {
 		fprintf(stderr, "---- stream %s (%zu bytes) ----\n", s->name, g_len);
 		for (size_t i = 0; i < g_len; i += 16) {

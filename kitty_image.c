@@ -471,6 +471,16 @@ static const uint32_t kg_diacc[297] = {
     0x1D244
 };
 
+/* The row/col/id-high diacritics are part of the KGP wire grammar
+ * (external authority: the spec's rowcolumn-diacritics table). The
+ * L2b live driver (tests/apptest) maps captured placeholder bytes
+ * through it, hence read-only access. Index 0..255 addresses one id
+ * high BYTE; the table carries spare slots beyond that on purpose. */
+const uint32_t *kitty_diac_table(void)
+{
+	return kg_diacc;
+}
+
 static int kg_diac_index(unsigned cp)
 {
 	for (int i = 0; i < 297; i++)
@@ -684,7 +694,6 @@ static int kgx_append(struct terminal_t *term, const char *b64, size_t b64len)
 	return 0;
 poison:
 	x->bad = true;
-	fprintf(stderr, "TRACE append POISON: b64len=%zu len=%zu cap=%zu\n", b64len, x->len, x->cap);
 	return -1;
 }
 

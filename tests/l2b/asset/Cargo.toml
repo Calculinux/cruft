@@ -1,0 +1,29 @@
+# One-shot ratatui-image driver for the cruft L2b pixel golden
+# (kitty-applive). NOT a product dependency: it is the *peer* side of the
+# live interop — a real app talking a real protocol to the product.
+#
+# Pinning is by git rev, not by crates.io version, because
+# ratatui-image is not published there; the rev is the exact commit this
+# tree's authority audit read:
+#   a08dc3ca538116482b9d18c76ab1b56984921539
+#   = "chore: release v12.0.0-rc.2 (#223)", tag v12.0.0-rc.2.
+#
+# Build (needs cargo + network for the first fetch only; the git checkout
+# and the crate cache persist afterwards):
+#   cargo build --release --manifest-path tests/l2b/asset/Cargo.toml
+[package]
+name = "apptest-asset"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# png only: no native codec deps in the graph
+image = { version = "0.25", default-features = false, features = ["png"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+# default-features off: skips chafa-dyn (pkg-config build dep) and
+# image-defaults (native codec set); we supply `image` above.
+ratatui-image = { git = "https://github.com/ratatui/ratatui-image", rev = "a08dc3ca538116482b9d18c76ab1b56984921539", default-features = false, features = ["crossterm"] }
+
+[profile.release]
+opt-level = 2

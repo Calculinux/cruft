@@ -728,6 +728,16 @@ static struct kitty_store *kg_store_find(struct terminal_t *term, uint32_t id)
 	return NULL;
 }
 
+/* Vacate a slot: free the image, NULL the pointer, mark free. Every
+ * release path funnels through here so a vacated slot can never strand
+ * a dangling img pointer for the next kg_store_put to free twice. */
+static void kg_store_drop(struct kitty_store *st)
+{
+	free(st->img);
+	st->img  = NULL;
+	st->used = false;
+}
+
 /* Steals img ownership. Slot choice: an existing slot with the same id
  * (re-transmission replaces it, per spec), else the first free slot,
  * else slot 0 (eviction). */
@@ -910,18 +920,15 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
 		if (k.d == 'i' && k.has_i) {
 			struct kitty_store *st = kg_store_find(term, (uint32_t) k.i);
 
-			if (st) {
-				free(st->img);
-				st->used = false;
-			}
+			if (st)
+				kg_store_drop(st);
 			if (term->kgx.have && term->kgx.id == (uint32_t) k.i)
 				kitty_xfer_abort(term);
 		} else if (!k.d) {
 			for (int s = 0; s < KITTY_STORE_SLOTS; s++) {
 				if (!term->kgs[s].used)
 					continue;
-				free(term->kgs[s].img);
-				term->kgs[s].used = false;
+				kg_store_drop(&term->kgs[s]);
 			}
 			kitty_xfer_abort(term);
 		}
@@ -1185,8 +1192,7 @@ void kitty_grab_free(struct terminal_t *term)
 	for (int s = 0; s < KITTY_STORE_SLOTS; s++) {
 		if (!term->kgs[s].used)
 			continue;
-		free(term->kgs[s].img);
-		term->kgs[s].used = false;
+		kg_store_drop(&term->kgs[s]);
 	}
 	term->kph = (struct kitty_ph) {0};
 }

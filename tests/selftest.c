@@ -2406,6 +2406,61 @@ int main(void)
 						"W9 id high byte 30 resolves");
 					u_teardown(&term);
 				}
+
+				/* W10: every store-release path (single delete,
+				 * delete-all, grab reset) must vacate a slot with a
+				 * NULL img pointer; the next transfer's kg_store_put
+				 * reclaims that slot and must free(NULL), not a
+				 * dangling pointer (double-free under ASAN before
+				 * the fix) */
+				{
+					uint8_t ipx[4 * 4 * 4];
+					char ib64[512];
+
+					memset(ipx, 0xAB, sizeof ipx);
+					st_b64enc(ipx, sizeof ipx, ib64);
+					expect(u_setup(&term) == 0, "W10 alloc");
+					term.fd = rp[1];
+					term.color_pair.bg = 0;
+
+					/* store id 1, then single-delete it */
+					sq = w_apc("q=2,i=1,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 drained");
+					expect(strstr(got, "\033_Gi=1;OK") != NULL, "W10 stored");
+					sq = w_apc("q=2,i=1,a=d,d=i", "");
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 del drained");
+					expect(strstr(got, "\033_Gi=1;OK") != NULL, "W10 single delete ok");
+
+					/* the reclaimed slot receives the next transfer */
+					sq = w_apc("q=2,i=2,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 rec drained");
+					expect(strstr(got, "\033_Gi=2;OK") != NULL, "W10 reclaim ok");
+
+					/* delete-all (silent without i=), then reclaim */
+					sq = w_apc("q=2,a=d", "");
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					sq = w_apc("q=2,i=3,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 ra drained");
+					expect(strstr(got, "\033_Gi=3;OK") != NULL, "W10 reclaim after delete-all ok");
+
+					/* grab reset frees the store; transfer lands clean */
+					kitty_grab_reset(&term);
+					sq = w_apc("q=2,i=4,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 rs drained");
+					expect(strstr(got, "\033_Gi=4;OK") != NULL, "W10 reclaim after grab reset ok");
+					u_teardown(&term);
+				}
 			}
 			close(rp[1]);
 			rp[1] = -1;

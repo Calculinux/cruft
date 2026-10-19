@@ -2,6 +2,7 @@
 #define CRUFT_NO_GLOBALS
 #include "cruft.h"
 #include "conf.h"
+#include "glyph.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -11,8 +12,9 @@
 
 /* /etc/cruft.conf: persistent defaults for the CRUFT_* environment
  * knobs, one KEY=VALUE per line ('#' comments, blanks ignored,
- * whitespace around the '=' allowed). The valid keys are exactly the
- * names the consumers already read from the environment; a file value
+ * whitespace around the '=' allowed). The valid keys are the six
+ * CRUFT_* names the consumers read from the environment
+ * (FRAMEBUFFER and CRUFT stay environment-only); a file value
  * is installed only when the environment does not carry the key yet,
  * so per-service Environment= lines or an exported shell variable
  * keep precedence. Unknown keys and malformed values are warned about
@@ -69,9 +71,14 @@ static bool conf_value_ok(const char *key, const char *val)
 		if (strcmp(key, "CRUFT_SB_12H") == 0)
 			return strcmp(val, "0") == 0 || strcmp(val, "1") == 0;
 		if (strcmp(key, "CRUFT_SB") == 0) {
+			/* Alnum + ',' (plus '_' from earlier revisions)
+			 * and the blanks sb_parse_segments() squeezes
+			 * into commas, so "time, battery" reaches the
+			 * status bar instead of the default selection. */
 			for (const char *p = val; *p; p++)
 				if (!isalnum((unsigned char) *p)
-				    && *p != ',' && *p != '_')
+				    && *p != ',' && *p != '_'
+				    && *p != ' ' && *p != '\t')
 					return false;
 			return true;
 		}
@@ -157,10 +164,24 @@ void conf_load_file(const char *path)
 	for (i = 0; i < n; i++) {
 		/* Environment precedence: a process-exported value wins;
 		 * duplicates from the file are settled above. */
-		if (vals[i][0] != '\0' && getenv(conf_keys[i]) == NULL)
-			if (setenv(conf_keys[i], vals[i], 0) != 0)
-				conf_warn("cruft.conf: setenv(%s) failed\n",
-					  conf_keys[i]);
+		if (vals[i][0] == '\0' || getenv(conf_keys[i]) != NULL)
+			continue;
+		/* A file-supplied main font must already be loadable:
+		 * glyph_mmap_init() aborts startup on a bad value, but
+		 * unlike an explicit environment override (a loud
+		 * failure the operator opted into) a broken line in the
+		 * shared config file is refused here, so the built-in
+		 * font stands. */
+		if (strcmp(conf_keys[i], "CRUFT_FONT") == 0
+		    && !glyph_main_font_usable(vals[i])) {
+			conf_warn("cruft.conf: ignoring CRUFT_FONT='%s' "
+				  "(not a loadable font); keeping the "
+				  "built-in\n", vals[i]);
+			continue;
+		}
+		if (setenv(conf_keys[i], vals[i], 0) != 0)
+			conf_warn("cruft.conf: setenv(%s) failed\n",
+				  conf_keys[i]);
 	}
 }
 

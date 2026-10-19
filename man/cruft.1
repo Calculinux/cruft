@@ -136,13 +136,26 @@ miniwi-console package).
 Persistent defaults can be set in
 .B /etc/cruft.conf ,
 one \fIKEY=VALUE\fP per line (\fB#\fP comments, blank lines and
-whitespace around the \fB=\fP are ignored). The recognised keys are
-exactly the environment variables above; the built-in default applies
-when neither the file nor the environment sets a key. Precedence:
-environment (per-service \fBEnvironment=\fP, exported shell variable)
-overrides the file, which overrides the built-in. Unknown keys and
-malformed values are skipped with a warning; a missing or empty file
-changes nothing.
+whitespace around the \fB=\fP are ignored). The recognised keys are the
+six \fICRUFT_*\fP variables above:
+.BR CRUFT_FONT ,
+.BR CRUFT_SB ,
+.BR CRUFT_SB_FONT ,
+.BR CRUFT_SB_12H ,
+.BR CRUFT_HISTORY
+and
+.B CRUFT_SB_RAM .
+.B FRAMEBUFFER
+and
+.B CRUFT
+are environment-only and cannot be set in the file. The built-in
+default applies when neither the file nor the environment sets a key.
+Precedence: environment (per-service \fBEnvironment=\fP, exported shell
+variable) overrides the file, which overrides the built-in. Unknown
+keys and malformed values are skipped with a warning, as is a
+.B CRUFT_FONT
+value the file supplies that is not a loadable font (the built-in font
+stands); a missing or empty file changes nothing.
 .SH AUTHOR
 .PP
 Calculinux fork; upstream yaft by haru <uobikiemukot at gmail dot com>

@@ -2353,7 +2353,7 @@ int main(void)
 				 * anchor must still be placed */
 				{
 					uint8_t phseq2[] = {
-						0x1B, '[', '7', ';', '1', 'H',
+						0x1B, '[', '2', ';', '1', 'H',
 						0x1B, '[', '3', '8', ';', '2', ';', '0',
 						';', '0', ';', '1', 'm',
 						0xF4, 0x8E, 0xBB, 0xAE, 0xCC, 0x85, 0xCC, 0x85,
@@ -2362,8 +2362,8 @@ int main(void)
 					};
 
 					parse(&term, phseq2, (int) sizeof phseq2);
-					expect(w_px(&term, 6, 0)->has_pixmap
-							&& w_px(&term, 6, 1)->has_pixmap,
+					expect(w_px(&term, 1, 0)->has_pixmap
+							&& w_px(&term, 1, 1)->has_pixmap,
 						"W4 two-diacritic placeholders paint");
 				}
 

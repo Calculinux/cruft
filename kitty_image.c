@@ -223,12 +223,13 @@ static void rgba_composite(const uint8_t *rgba, int tw, int th, int transparent,
 /*
  * Decode a PNG payload via the libpng high-level API into 0x00RRGGBB
  * (aspect-preserving fit into the region below/right of the cursor).
- * *img_out is malloc'd on success.
+ * *img_out is malloc'd on success. Exists only in libpng builds: a build
+ * without libpng answers f=100 with ENOSYS at the dispatcher instead.
  */
+#ifdef HAVE_LIBPNG
 static int png_decode(const uint8_t *raw, size_t n, struct terminal_t *term,
 		      int transparent, uint32_t bg, int *tw, int *th, uint32_t **img)
 {
-#ifdef HAVE_LIBPNG
 	/* png_image is a typedef of an anonymous struct in libpng */
 	png_image pi;
 	uint32_t *rgba = NULL;
@@ -317,12 +318,8 @@ static int png_decode(const uint8_t *raw, size_t n, struct terminal_t *term,
 	free(rgba);
 	*img = out;
 	return 0;
-#else
-	(void) raw; (void) n; (void) term; (void) transparent; (void) bg;
-	(void) tw; (void) th; (void) img;
-	return -1;
-#endif
 }
+#endif /* HAVE_LIBPNG */
 
 /*
  * Paint a tw x th 0x00RRGGBB image at the cursor, mirroring sixel_copy2cell's
@@ -512,7 +509,7 @@ static void kg_parse_par(const char *p, size_t n, struct kg_par *k)
 			off++;
 		tok  = p + off;
 		tlen = 0;
-		while (tlen < n - off && tok[tlen] != ',')
+		while (off + tlen < n && tok[tlen] != ',')
 			tlen++;
 		if (tlen == 0)
 			break; /* trailing separator */
@@ -705,7 +702,7 @@ poison:
 /* Native-size 0x00RRGGBB image of a finished transfer (NULL on failure). */
 static uint32_t *kgx_build(struct terminal_t *term, uint32_t bg)
 {
-	struct kitty_xfer *x = &term->kgx;
+	const struct kitty_xfer *x = &term->kgx;
 	uint32_t *img;
 
 	if (!x->have || x->bad || x->len < x->cap)
@@ -970,7 +967,7 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
 		if (!k.has_i)
 			return;
 		{
-			struct kitty_store *st = kg_store_find(term, (uint32_t) k.i);
+			const struct kitty_store *st = kg_store_find(term, (uint32_t) k.i);
 
 			if (st) {
 				kg_place_at(term, st,
@@ -995,6 +992,7 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
 					"ENOSYS:compression unsupported");
 		return;
 	}
+#ifdef HAVE_LIBPNG
 	if (k.f == 100) {
 		uint32_t *img = NULL;
 		int tw = 0, th = 0;
@@ -1029,6 +1027,17 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
 			kg_reply_quiet(term, &k, (unsigned long) k.i, true, "");
 		return;
 	}
+#else
+	/* builds without libpng can never decode a PNG payload, so the
+	 * failure is permanent: say so instead of a misleading
+	 * "unreadable payload" */
+	if (k.f == 100) {
+		if (k.has_i)
+			kg_reply_quiet(term, &k, (unsigned long) k.i, false,
+				       "ENOSYS:png unsupported in this build");
+		return;
+	}
+#endif
 	/* raw pixels, single shot */
 	if (kgx_start(term, &k) < 0) {
 		if (k.has_i)
@@ -1092,7 +1101,7 @@ static void kg_ph_row_head(struct terminal_t *term)
 
 	if (ph->nd >= 2 && row == 0 && col == 0) {
 		/* anchor of a (re)placement: paint the whole image */
-		struct kitty_store *st = kg_store_find(term, id);
+		const struct kitty_store *st = kg_store_find(term, id);
 
 		if (st) {
 			kg_place_at(term, st, (int) ph->ax, (int) ph->ay,

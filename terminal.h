@@ -494,6 +494,12 @@ bool term_init(struct terminal_t *term, int width, int height)
 
 	memset(term->drcs, 0, sizeof(term->drcs));
 
+	/* kitty graphics state: main() hands us an uninitialised terminal_t,
+	 * and kitty_xfer_abort()/kitty_grab_free() free() what they find here */
+	term->kgx = (struct kitty_xfer) {0};
+	memset(term->kgs, 0, sizeof(term->kgs));
+	term->kph = (struct kitty_ph) {0};
+
 	if (!term->esc.buf || !screen_matrix_alloc(term, &term->scr[0])) {
 		term_die(term);
 		return false;

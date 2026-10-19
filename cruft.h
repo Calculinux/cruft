@@ -333,6 +333,7 @@ bool kitty_png_available(void);
 void kitty_dcs_dispatch(struct terminal_t *term, const char *body);
 bool kitty_ph_feed(struct terminal_t *term, uint32_t code);
 void kitty_ph_newline(struct terminal_t *term);
+void kitty_ph_flush(struct terminal_t *term);
 void kitty_ph_invalidate(struct terminal_t *term);
 void kitty_xfer_abort(struct terminal_t *term);
 void kitty_grab_reset(struct terminal_t *term);

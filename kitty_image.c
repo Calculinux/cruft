@@ -421,6 +421,7 @@ static void kitty_paint_core(struct terminal_t *term, const uint32_t *img,
  */
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -569,12 +570,22 @@ static int kg_format(int f, int *first_red)
 static void kg_send(struct terminal_t *term, const char *idpart, const char *msg)
 {
 	char buf[96];
-	int n;
+	int n, flags;
 
 	n = snprintf(buf, sizeof buf, "\033_G%s;%s\033\\", idpart, msg);
-	if (n > 0 && write(term->fd, buf, (size_t) n) < 0)
+	if (n <= 0)
+		return;
+	/* Never block the main loop: if the client is not draining its input
+	 * (and is itself blocked writing to us) a blocking write deadlocks
+	 * cruft and the app. A reply nobody reads is dropped. */
+	flags = fcntl(term->fd, F_GETFL);
+	if (flags >= 0)
+		fcntl(term->fd, F_SETFL, flags | O_NONBLOCK);
+	if (write(term->fd, buf, (size_t) n) < 0 && errno != EAGAIN)
 		fprintf(stderr, "cruft: kitty_dcs: reply write failed: %s\n",
 			strerror(errno));
+	if (flags >= 0)
+		fcntl(term->fd, F_SETFL, flags);
 }
 
 static void kg_reply_id(struct terminal_t *term, unsigned long id, const char *msg)
@@ -585,13 +596,15 @@ static void kg_reply_id(struct terminal_t *term, unsigned long id, const char *m
 	kg_send(term, idpart, msg);
 }
 
-/* Reply honouring q=: 1 suppresses OK, 2 suppresses errors. */
+/* Reply honouring q=: 1 suppresses OK, 2 suppresses OK and errors (spec).
+ * Clients that send q=2 (ratatui-image) never read replies, so anything
+ * emitted anyway piles up in the pty input queue. */
 static void kg_reply_quiet(struct terminal_t *term, const struct kg_par *k,
 			   unsigned long id, int ok, const char *err)
 {
-	if (ok && k->q == 1)
+	if (ok && k->q >= 1)
 		return;
-	if (!ok && k->q == 2)
+	if (!ok && k->q >= 2)
 		return;
 	kg_reply_id(term, id, ok ? "OK": err);
 }
@@ -601,9 +614,9 @@ static void kg_reply_quiet(struct terminal_t *term, const struct kg_par *k,
 static void kg_reply_plain(struct terminal_t *term, unsigned q,
 			   unsigned long id, int ok, const char *err)
 {
-	if (ok && q == 1)
+	if (ok && q >= 1)
 		return;
-	if (!ok && q == 2)
+	if (!ok && q >= 2)
 		return;
 	kg_reply_id(term, id, ok ? "OK": err);
 }
@@ -1140,6 +1153,10 @@ bool kitty_ph_feed(struct terminal_t *term, uint32_t code)
 	if (code == KITTY_PH_CODE) {
 		if (!(ph->region.on || term->tc_fg_on))
 			return false; /* bare placeholder: tofu it normally */
+		/* the previous cell's diacritic run ends here: ratatui-image
+		 * sends only row+col (2 marks), so the 3-mark trigger below
+		 * never fires for it */
+		kg_ph_row_head(term);
 		ph->ax  = active_screen(term)->cursor.x;
 		ph->ay  = active_screen(term)->cursor.y;
 		ph->rgb = term->tc_fg_rgb;
@@ -1169,10 +1186,19 @@ bool kitty_ph_feed(struct terminal_t *term, uint32_t code)
 	return false;
 }
 
+/* Resolve a placeholder whose diacritic run was ended by something other
+ * than a glyph (newline, CSI): without this a lone or last cell of a row
+ * would never be placed. */
+void kitty_ph_flush(struct terminal_t *term)
+{
+	kg_ph_row_head(term);
+}
+
 void kitty_ph_newline(struct terminal_t *term)
 {
 	struct kitty_ph *ph = &term->kph;
 
+	kg_ph_row_head(term);
 	if (ph->region.on) {
 		ph->region.rows_done++;
 		if (ph->region.rows_done >= ph->region.vr)

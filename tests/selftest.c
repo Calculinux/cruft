@@ -2299,17 +2299,24 @@ int main(void)
 				term.fd = rp[1];
 				term.color_pair.bg = 0; /* blend over black, not u_setup's white */
 
-				sq = w_apc("q=2,i=1,a=T,U=1,f=32,t=d,s=12,v=12,c=2,r=1,m=1", b64a);
+				sq = w_apc("i=1,a=T,U=1,f=32,t=d,s=12,v=12,c=2,r=1,m=1", b64a);
 				parse(&term, sq, (int) strlen((const char *) sq));
 				free(sq);
 				expect(w_px(&term, 0, 0)->has_pixmap == false,
 					"W4 stored, not painted yet");
 
-				sq = w_apc("q=2,m=0", b64b);
+				sq = w_apc("m=0", b64b);
 				parse(&term, sq, (int) strlen((const char *) sq));
 				free(sq);
 				expect(w_drain(rp[0], got, sizeof got) > 0, "W4 drained");
 				expect(strstr(got, "\033_Gi=1;OK") != NULL, "W4 OK reply");
+
+				/* q=2 (ratatui-image) silences OK too: an unread reply
+				 * would fill the pty input queue and deadlock cruft */
+				sq = w_apc("q=2,i=77,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", b64a);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) <= 0, "W4 q=2 silent");
 				expect(w_px(&term, 0, 0)->has_pixmap == false,
 					"W4 still only stored");
 
@@ -2339,6 +2346,25 @@ int main(void)
 					expect(active_screen(&term)->cursor.x == 2
 							&& active_screen(&term)->cursor.y == 1,
 						"W4 cursor past the placement");
+				}
+
+				/* ratatui-image form: only row+col diacritics (2 marks),
+				 * every cell carries them, the row ends in a CSI - the
+				 * anchor must still be placed */
+				{
+					uint8_t phseq2[] = {
+						0x1B, '[', '7', ';', '1', 'H',
+						0x1B, '[', '3', '8', ';', '2', ';', '0',
+						';', '0', ';', '1', 'm',
+						0xF4, 0x8E, 0xBB, 0xAE, 0xCC, 0x85, 0xCC, 0x85,
+						0xF4, 0x8E, 0xBB, 0xAE, 0xCC, 0x85, 0xCD, 0x8E,
+						0x1B, '[', '3', '9', 'm',
+					};
+
+					parse(&term, phseq2, (int) sizeof phseq2);
+					expect(w_px(&term, 6, 0)->has_pixmap
+							&& w_px(&term, 6, 1)->has_pixmap,
+						"W4 two-diacritic placeholders paint");
 				}
 
 				/* W5: a=p re-places the stored image elsewhere */
@@ -2452,7 +2478,7 @@ int main(void)
 					expect(u_setup(&term) == 0, "W9 alloc");
 					term.fd = rp[1];
 					term.color_pair.bg = 0;
-					sq = w_apc("q=2,i=503316487,a=T,U=1,f=32,t=d,s=6,v=12,c=1,r=1", gb64);
+					sq = w_apc("i=503316487,a=T,U=1,f=32,t=d,s=6,v=12,c=1,r=1", gb64);
 					parse(&term, sq, (int) strlen((const char *) sq));
 					free(sq);
 					expect(w_drain(rp[0], got, sizeof got) > 0, "W9 drained");
@@ -2483,29 +2509,29 @@ int main(void)
 					term.color_pair.bg = 0;
 
 					/* store id 1, then single-delete it */
-					sq = w_apc("q=2,i=1,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					sq = w_apc("i=1,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
 					parse(&term, sq, (int) strlen((const char *) sq));
 					free(sq);
 					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 drained");
 					expect(strstr(got, "\033_Gi=1;OK") != NULL, "W10 stored");
-					sq = w_apc("q=2,i=1,a=d,d=i", "");
+					sq = w_apc("i=1,a=d,d=i", "");
 					parse(&term, sq, (int) strlen((const char *) sq));
 					free(sq);
 					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 del drained");
 					expect(strstr(got, "\033_Gi=1;OK") != NULL, "W10 single delete ok");
 
 					/* the reclaimed slot receives the next transfer */
-					sq = w_apc("q=2,i=2,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					sq = w_apc("i=2,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
 					parse(&term, sq, (int) strlen((const char *) sq));
 					free(sq);
 					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 rec drained");
 					expect(strstr(got, "\033_Gi=2;OK") != NULL, "W10 reclaim ok");
 
 					/* delete-all (silent without i=), then reclaim */
-					sq = w_apc("q=2,a=d", "");
+					sq = w_apc("a=d", "");
 					parse(&term, sq, (int) strlen((const char *) sq));
 					free(sq);
-					sq = w_apc("q=2,i=3,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					sq = w_apc("i=3,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
 					parse(&term, sq, (int) strlen((const char *) sq));
 					free(sq);
 					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 ra drained");
@@ -2513,7 +2539,7 @@ int main(void)
 
 					/* grab reset frees the store; transfer lands clean */
 					kitty_grab_reset(&term);
-					sq = w_apc("q=2,i=4,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					sq = w_apc("i=4,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
 					parse(&term, sq, (int) strlen((const char *) sq));
 					free(sq);
 					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 rs drained");

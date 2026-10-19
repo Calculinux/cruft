@@ -346,10 +346,10 @@ banked here and the `.so` was deleted.
 - Frame verification: **6 000/6 000 pixels exact (TOL 0)** against
   the source PNG RGBA — lossless end-to-end (PNG → app decode →
   raw RGBA → b64 → product decode → composite).
-- Frozen reply is exactly **54 B**: `ESC[1;1R` (CPR) ·
+- Frozen reply is exactly **42 B**: `ESC[1;1R` (CPR) ·
   `ESC _ G i=31;OK ST` (probe) · `ESC [ ? 6 2 ; 4 ; 6 c` (DA1) ·
   `ESC [ 1 6 ; 1 2 ; 6 t` (cell size, pixels) · `ESC [ 0 n` (SDS
-  sentinel) · `ESC _ G i=32;OK ST` (transfer ack, id pinned).
+  sentinel). The `q=2` transfer is deliberately unacknowledged.
 - Determinism: two successive check-mode runs with different
   client-random ids (e.g. `0xff3de49f`, `0x062ceeac`) produced
   byte-identical canonical artefacts — the goldens hold across the
@@ -410,7 +410,7 @@ Each cost iterations; listed so the next round does not repay them.
   `img/apptest-100x60.png` (source image) and
   `img/apptest-100x60.b64` (the independent 32 000 B ideal payload).
 - `tests/goldens/kitty-applive.{trace,reply,frame}` — 32 694 B /
-  54 B / 409 600 B; plus the `sixel-icy-overlay.{dcs,frame,reply}`
+  42 B / 409 600 B; plus the `sixel-icy-overlay.{dcs,frame,reply}`
   scene frozen in the same sweep; L2a goldens byte-unchanged.
 - Diagnostic dumps (best-effort, `/tmp/apptest-debug.*`) are written
   beside each ladder rung that fails, so any future regression
@@ -446,7 +446,7 @@ binary, `make test` (selftest incl. the new V section and W end-to-end),
 `make lint` (all TU groups, `-Werror`), `tests/golden` 5/5 twice,
 `make apptest-live` twice with distinct client-random transfer ids —
 canonical trace 32 694 B byte-identical to the frozen golden both runs,
-live reply == replay reply (54 B).
+live reply == replay reply (42 B).
 
 Follow-up against PR #10 (not this branch): sbdisk's blank row does not
 regrow when the grid widens after attach; a resize past the attach width

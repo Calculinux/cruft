@@ -103,6 +103,7 @@ void csi_sequence(struct terminal_t *term, uint8_t ch)
 	reset_parm(&parm);
 	parse_arg(term->esc.buf + 1, &parm, ';', isdigit); /* skip '[' */
 
+	kitty_ph_flush(term); /* a CSI ends any placeholder diacritic run */
 	if (csi_func[ch])
 		csi_func[ch](term, &parm);
 

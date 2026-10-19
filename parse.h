@@ -188,14 +188,10 @@ void dcs_sequence(struct terminal_t *term, uint8_t ch)
 
 	logging(DEBUG, "dcs: DCS %s\n", term->esc.buf);
 
-	/* kitty graphics travels in the two non-DCS intros (ESC + per the
-	 * spec, ESC _ G in its APC spelling); the ESC P body below is the
-	 * traditional one (sixel, DECDLD) */
-	if (term->esc.dcs_kind == '+') {
-		kitty_dcs_dispatch(term, term->esc.buf + 1);
-		reset_esc(term);
-		return;
-	}
+	/* kitty graphics travels in the APC intro (ESC _ G) - the only
+	 * envelope the shipped spec defines (ESC + is the ECMA-35 G3
+	 * designator prefix and must stay a plain intermediate); the
+	 * ESC P body below is the traditional DCS one (sixel, DECDLD) */
 	if (term->esc.dcs_kind == '_') {
 		kitty_dcs_dispatch(term, term->esc.buf + 2);
 		reset_esc(term);

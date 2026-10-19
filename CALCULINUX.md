@@ -148,20 +148,21 @@ wifi stair + battery right. `term_init` shrinks the grid by
   path is untouched. FB type shapes live in `fb/fb.h` (definitions-free,
   so `status.c` can see them without dragging in the one-TU fb backend).
 
-## Image protocols (sixel / kitty DCS)
+## Image protocols (sixel / kitty)
 
 Two image paths land on the same sparse per-cell pixmaps, so scroll/erase/
 alt-screen/VT-deactivate behave identically for all of them:
 
 - Sixel (DCS 62 t): long-standing path, unchanged (`sixel_canvas.c`,
   `terminal_cell.c`).
-- **Kitty graphics protocol (DCS `+` / APC `_G`)** — `kitty_image.c`. The real
-  kitty wire protocol (kovidgoyal/kitty graphics-protocol spec); ratatui-image
+- **Kitty graphics protocol (APC `_G`)** — `kitty_image.c`. The real kitty
+  wire protocol (kovidgoyal/kitty graphics-protocol spec); ratatui-image
   speaks this, and the capability probes let its picker upgrade to Kitty
   instead of falling back to halfblocks:
-  - Both envelopes are accepted: `ESC + <par>;<b64> ESC \` (classic DCS) and
-    `ESC _ G <par>;<b64> ESC \` (APC — normative in the shipped spec, and what
-    ratatui emits). `ESC _` parks the parser in `STATE_KPND`; only the `G`
+  - The envelope is `ESC _ G <par>;<b64> ESC \` (APC — the only form the
+    shipped spec defines, and what ratatui emits; `ESC +` is the ECMA-35 G3
+    designator prefix, not a graphics intro, and stays a plain intermediate).
+    `ESC _` parks the parser in `STATE_KPND`; only the `G`
     introducer promotes it, and `esc_t.dcs_kind` steers `dcs_sequence()` so
     `ESC P` stays on the sixel path.
   - Parameters per spec: `i/I/s/v/f/m/c/r/q/a/U/t/o/d`. Chunked transfers
@@ -189,9 +190,9 @@ alt-screen/VT-deactivate behave identically for all of them:
     reports the cell pixel size (`ESC [16;<h>;<w>t`, height first, matching
     ratatui's matcher), `i=31` gets the byte-exact `ESC _ G i=31;OK ESC \`,
     DSR/CPR were already answered.
-  - Documented deviations: truecolor SGR 38;2/48;2 parks the exact RGB in
-    reserved palette slots 254/255 so ids survive unquantized (those slots
-    shadow two palette grays while the dynamic colour is in effect);
+  - Documented deviations: truecolor SGR 38;2/48;2 renders cells in the
+    nearest palette colour (stable across later SGRs) and keeps the exact RGB
+    in live terminal state only, so ids survive unquantized;
     zlib/SHM/file payloads are declined politely; no file/t= transport.
 - **iTerm2 graphics (OSC 1337) — deliberately unsupported.** An early `File ;`
   / `Image ;` decoder lived here alongside the DCS path, but its raw-BGR +
@@ -203,10 +204,10 @@ alt-screen/VT-deactivate behave identically for all of them:
 
 Shared placement for all image paths:
 - Budgets: decoded images are capped at `KITTY_MAX_PIXELS` (512x512); an
-  over-capacity DCS transfer poisons its transfer state and dies with an error
+  over-capacity kitty transfer poisons its transfer state and dies with an error
   reply, screen untouched.
 - Anchors at the cursor and fits (nearest-neighbour, aspect preserved by
-  default) into the region to the grid edges; it never scrolls. The DCS path
+  default) into the region to the grid edges; it never scrolls. The kitty path
   uses the spec's right/down epilogue.
 - Alpha composites over the current background colour when the payload has one
   (the DCS fourth channel); cells have no alpha channel of their own, unfilled

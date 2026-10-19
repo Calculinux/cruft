@@ -545,7 +545,9 @@ static int g_run_one(const struct scen *s, int update)
 		}
 		fprintf(stderr, "---- end stream ----\n");
 	}
-	memset(g_frame, 0xEF, sizeof g_frame);	/* 0xFEFEFEFE pixel-wise */
+	/* 0xFE per byte = the SENTINEL pixel value on either endianness,
+	 * so the coverage guard below can actually fail */
+	memset(g_frame, 0xFE, sizeof g_frame);
 	g_make_fb(&fb);
 	memset(&term, 0, sizeof term);
 	if (!term_init(&term, GW, GH)) {
@@ -607,8 +609,10 @@ static int g_run_one(const struct scen *s, int update)
 			printf("updated %s (%lu reply bytes)\n", pf,
 			       (unsigned long) g_repllen);
 		}
-		fclose(f);
-		fclose(r);
+		if (f)
+			fclose(f);	/* a failed fopen left the other NULL */
+		if (r)
+			fclose(r);
 	} else {
 		static uint8_t gframe[GSZ];
 		static uint8_t greply[REPLY_SZ];

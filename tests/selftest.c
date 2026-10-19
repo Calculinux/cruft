@@ -2235,6 +2235,7 @@ int main(void)
 				memcpy(b64b, b64 + 340, 768 - 340);
 				b64b[768 - 340] = '\0';
 
+				u_teardown(&term); /* release the W base fixture */
 				expect(u_setup(&term) == 0, "W4 alloc");
 				term.fd = rp[1];
 				term.color_pair.bg = 0; /* blend over black, not u_setup's white */
@@ -2352,6 +2353,7 @@ int main(void)
 						apx[i * 4 + 3] = 128;
 					}
 					st_b64enc(apx, sizeof apx, ab64);
+					u_teardown(&term); /* release the W6 fixture */
 					expect(u_setup(&term) == 0, "W7 alloc");
 					term.fd = rp[1];
 					term.color_pair.bg = 0;
@@ -2362,6 +2364,46 @@ int main(void)
 					expect(w_px(&term, 0, 0)->has_pixmap
 							&& w_px(&term, 0, 0)->pixmap[2] == 128,
 						"W7 alpha blended");
+					u_teardown(&term);
+				}
+
+				/* W9: an id whose high byte is >= 30 rides a diacritic OUTSIDE
+				 * U+0300..U+036F (table index 30 = U+0483); the placeholder
+				 * resolver must honour the whole rowcolumn table, not just the
+				 * Greek block, or the image never resolves */
+				{
+					uint8_t gpx[6 * 12 * 4];
+					char gb64[512];
+					uint8_t ph9[] = {
+						0x1B, '[', '3', '8', ';', '2', ';', '0',
+						';', '0', ';', '7', 'm',
+						0xF4, 0x8E, 0xBB, 0xAE, /* U+10EEEE */
+						0xCC, 0x85, 0xCC, 0x85, 0xD2, 0x83, /* d(0)d(0)d(30)=U+0483 */
+						'\n',
+						0x1B, '[', '3', '9', 'm',
+					};
+
+					for (int gi = 0; gi < 6 * 12; gi++) {
+						gpx[gi * 4 + 0] = 0;
+						gpx[gi * 4 + 1] = 255;
+						gpx[gi * 4 + 2] = 0;
+						gpx[gi * 4 + 3] = 255;
+					}
+					st_b64enc(gpx, sizeof gpx, gb64);
+					expect(u_setup(&term) == 0, "W9 alloc");
+					term.fd = rp[1];
+					term.color_pair.bg = 0;
+					sq = w_apc("q=2,i=503316487,a=T,U=1,f=32,t=d,s=6,v=12,c=1,r=1", gb64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W9 drained");
+					expect(strstr(got, "\033_Gi=503316487;OK") != NULL, "W9 OK reply");
+					parse(&term, ph9, (int) sizeof ph9);
+					expect(w_px(&term, 0, 0)->has_pixmap
+							&& w_px(&term, 0, 0)->pixmap[1] == 0xFF
+							&& w_px(&term, 0, 0)->pixmap[0] == 0x00
+							&& w_px(&term, 0, 0)->pixmap[2] == 0x00,
+						"W9 id high byte 30 resolves");
 					u_teardown(&term);
 				}
 			}

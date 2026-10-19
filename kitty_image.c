@@ -3,8 +3,9 @@
  *
  * Second image path next to sixel: the kitty graphics protocol proper
  * (kitten icat, catimg, chafa -O kitty, ratatui-image):
- *     ESC + ... / ESC _ G ... ; PAYLOAD ST
- * with the spec's key=value control data. Raw pixel formats honour the
+ *     ESC _ G ... ; PAYLOAD ST
+ * (the APC spelling - the only envelope the shipped spec defines) with
+ * the spec's key=value control data. Raw pixel formats honour the
  * spec byte order (f=24/34 RGB, f=32 RGBA, f=33 BGRA, f=35 BGR;
  * kg_format()); PNG (f=100) only when built against the system libpng,
  * see makefile. Compression (o=z) is refused with a clean ENOSYS reply.
@@ -618,8 +619,12 @@ static uint8_t *kg_dbuf(size_t need)
 	static size_t cap = 0;
 
 	if (need > cap) {
-		buf  = realloc(buf, need);
-		cap = buf ? need: 0;
+		uint8_t *nb = realloc(buf, need);
+
+		if (!nb)
+			return NULL;	/* keep the old block, let the caller bail */
+		buf = nb;
+		cap = need;
 	}
 	return buf;
 }
@@ -705,7 +710,10 @@ static uint32_t *kgx_build(struct terminal_t *term, uint32_t bg)
 
 	if (!x->have || x->bad || x->len < x->cap)
 		return NULL;
-	img = malloc(x->cap * BYTES_PER_PIXEL);
+	/* the output is w*h pixels, not the (possibly multi-channel) raw
+	 * byte count - sizing it from x->cap blew the allocation up 3-4x
+	 * on a RAM-tight target */
+	img = malloc((size_t) x->w * (size_t) x->h * BYTES_PER_PIXEL);
 	if (!img)
 		return NULL;
 	raw_expand(x->raw, x->w, x->h, x->chan, x->first_red, 1, bg,
@@ -723,22 +731,25 @@ static struct kitty_store *kg_store_find(struct terminal_t *term, uint32_t id)
 	return NULL;
 }
 
-/* Steals img ownership. Slot eviction: first free, else slot 0 (oldest). */
+/* Steals img ownership. Slot choice: an existing slot with the same id
+ * (re-transmission replaces it, per spec), else the first free slot,
+ * else slot 0 (eviction). */
 static struct kitty_store *kg_store_put(struct terminal_t *term, uint32_t id,
 					uint32_t *img, unsigned w, unsigned h)
 {
-	struct kitty_store *slot = NULL;
+	struct kitty_store *slot = kg_store_find(term, id);
 
-	for (int s = 0; s < KITTY_STORE_SLOTS; s++) {
-		if (!term->kgs[s].used) {
-			slot = &term->kgs[s];
-			break;
-		}
-	}
 	if (!slot) {
-		slot = &term->kgs[0];
-		free(slot->img);
+		for (int s = 0; s < KITTY_STORE_SLOTS; s++) {
+			if (!term->kgs[s].used) {
+				slot = &term->kgs[s];
+				break;
+			}
+		}
+		if (!slot)
+			slot = &term->kgs[0];
 	}
+	free(slot->img);
 	slot->used = true;
 	slot->id   = id;
 	slot->img  = img;
@@ -795,6 +806,16 @@ static void kg_paint_direct(struct terminal_t *term, const uint32_t *img,
 		move_cursor(term, lines, cols);
 }
 
+/* The colour semi-transparent pixels blend over: the exact truecolor bg
+ * when a 48;2 is live (cells only know its quantized index), else the
+ * palette entry for the current bg index. */
+static uint32_t kg_blend_bg(struct terminal_t *term)
+{
+	return term->tc_bg_on
+		? term->tc_bg_rgb
+		: term->virtual_palette[term->color_pair.bg];
+}
+
 /*
  * Finish an assembled transfer: store it (virtual placement) or paint it,
  * and answer the id if one rode along.
@@ -805,7 +826,7 @@ static void kgx_complete(struct terminal_t *term)
 	uint32_t *img = NULL;
 
 	if (x->have && !x->bad)
-		img = kgx_build(term, term->virtual_palette[term->color_pair.bg]);
+		img = kgx_build(term, kg_blend_bg(term));
 
 	if (!img) {
 		if (x->has_id)
@@ -984,7 +1005,7 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
 		db = kg_dbuf(plen / 4 * 3 + 4);
 		if (db && kg_b64(payload, plen, db, plen / 4 * 3 + 4, &dl) == 0)
 			ok = png_decode(db, dl, term, 1,
-					term->virtual_palette[term->color_pair.bg],
+					kg_blend_bg(term),
 					&tw, &th, &img) == 0;
 		if (!ok) {
 			if (k.has_i)
@@ -1030,11 +1051,11 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
  * on the left (zero diacritics of their own).
  */
 
-/* truecolor SGR values park in the reserved dynamic slots (see set_attr)
- * so the id survives unquantized. */
-static uint32_t kg_ph_id(struct terminal_t *term, unsigned fg, unsigned hi)
+/* The id rides in the live truecolor fg (captured at the placeholder
+ * cell, see set_attr notes in cruft.h), so it survives unquantized. */
+static uint32_t kg_ph_id(uint32_t rgb, unsigned hi)
 {
-	return (hi << 24) | (term->virtual_palette[fg] & 0xFFFFFF);
+	return ((uint32_t) hi << 24) | (rgb & 0xFFFFFF);
 }
 
 /* Move on as addch() would for a width-1 glyph, without writing the
@@ -1062,12 +1083,12 @@ static void kg_ph_row_head(struct terminal_t *term)
 	if (!ph->pend)
 		return;
 	ph->pend = false;
-	if (ph->fg != KITTY_DYN_FG)
+	if (!ph->fg_tc)
 		return; /* consumed region cell: no id can be carried */
 	row = ph->nd > 0 ? ph->d[0]: 0;
 	col = ph->nd > 1 ? ph->d[1]: 0;
 	hi  = ph->nd > 2 ? ph->d[2]: 0;
-	id  = kg_ph_id(term, ph->fg, hi);
+	id  = kg_ph_id(ph->rgb, hi);
 
 	if (ph->nd >= 2 && row == 0 && col == 0) {
 		/* anchor of a (re)placement: paint the whole image */
@@ -1101,30 +1122,33 @@ bool kitty_ph_feed(struct terminal_t *term, uint32_t code)
 	struct kitty_ph *ph = &term->kph;
 
 	if (code == KITTY_PH_CODE) {
-		if (!(ph->region.on || term->color_pair.fg == KITTY_DYN_FG))
+		if (!(ph->region.on || term->tc_fg_on))
 			return false; /* bare placeholder: tofu it normally */
 		ph->ax  = active_screen(term)->cursor.x;
 		ph->ay  = active_screen(term)->cursor.y;
-		ph->fg  = term->color_pair.fg;
+		ph->rgb = term->tc_fg_rgb;
+		ph->fg_tc = term->tc_fg_on;
 		ph->nd  = 0;
 		ph->pend = true;
 		kg_ph_advance(term);
 		return true;
 	}
-	if (ph->pend && 0x0300 <= code && code <= 0x036F) {
+	if (ph->pend) {
+			/* the id-high diacritic can sit anywhere in the table
+		 * (rowcolumn-diacritics: index 30+ lives in U+0483 and
+		 * beyond), so recognise every table code point, not just
+		 * U+0300-U+036F */
 		int idx = kg_diac_index(code);
 
-		if (idx < 0)
-			return false; /* foreign combining mark */
+		if (idx < 0) {
+			kg_ph_row_head(term); /* group ends here */
+			return false;
+		}
 		if (ph->nd < 3)
 			ph->d[ph->nd++] = (unsigned) idx;
 		if (ph->nd == 3)
 			kg_ph_row_head(term);
 		return true;
-	}
-	if (ph->pend) {
-		kg_ph_row_head(term); /* group ended without full diacritics */
-		return false;
 	}
 	return false;
 }

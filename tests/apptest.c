@@ -44,7 +44,10 @@
  * in - the transfer header (i=), the placeholder cells' truecolor
  * SGR (low 24 bits, the encoding audited at kitty_image.c:1015-
  * 1021), and the row-head diacritics' id-high byte (kg_diacc[],
- * exported as kitty_diac_table()) - and nowhere else. The i=31
+ * exported as kitty_diac_table(); the rewrite is positional - only the
+ * THIRD diacritic of each group - so a run whose id-high coincides
+ * with a low row index cannot eat the row diacritic) - and nowhere
+ * else. The i=31
  * protocol-probe id is untouched: a deterministic capability token.
  * (Pinning the header alone desynchronises the store key from the
  * placeholder id and blanks the image - the first naively-pinned
@@ -424,17 +427,63 @@ static void emit_params_rewritten(const uint8_t *body, size_t plen)
 		die("transfer id rewrite missed");
 }
 
+/* Decode the UTF-8 code point sitting at in[i] (0 on success): spots
+ * table diacritics inside the placeholder runs. */
+static int canon_utf8(const uint8_t *p, size_t n, size_t i,
+		      uint32_t *cp, size_t *adv)
+{
+	const uint8_t c = p[i];
+
+	if (c < 0x80) {
+		*cp = c;
+		*adv = 1;
+		return 0;
+	}
+	if ((c & 0xE0) == 0xC0 && i + 1 < n) {
+		*cp = ((uint32_t) (c & 0x1F) << 6) | (p[i + 1] & 0x3F);
+		*adv = 2;
+		return 0;
+	}
+	if ((c & 0xF0) == 0xE0 && i + 2 < n) {
+		*cp = ((uint32_t) (c & 0x0F) << 12) |
+		      ((uint32_t) (p[i + 1] & 0x3F) << 6) |
+		      (p[i + 2] & 0x3F);
+		*adv = 3;
+		return 0;
+	}
+	if ((c & 0xF8) == 0xF0 && i + 3 < n) {
+		*cp = ((uint32_t) (c & 0x07) << 18) |
+		      ((uint32_t) (p[i + 1] & 0x3F) << 12) |
+		      ((uint32_t) (p[i + 2] & 0x3F) << 6) |
+		      (p[i + 3] & 0x3F);
+		*adv = 4;
+		return 0;
+	}
+	return -1;
+}
+
+#define CANON_DIAGN 297	/* must match kg_diacc[] in kitty_image.c */
+static int canon_diag_index(uint32_t cp)
+{
+	const uint32_t *t = kitty_diac_table();
+	int i;
+
+	for (i = 0; i < CANON_DIAGN; i++)
+		if (t[i] == cp)
+			return i;
+	return -1;
+}
+
 /* pass 2: scaffold verbatim; payloads from the ideal; the id pinned
  * in every carrier (header, SGR truecolor, id-high diacritic) */
 static size_t canon_build(const uint8_t *in, size_t n,
 			  struct canon_stats *cs)
 {
-	uint8_t dold[8], dnew[8];
-	size_t dol = utf8_put(dold,
-			      kitty_diac_table()[
-				      (unsigned) (cs->id >> 24) & 0xFF]);
+	uint8_t dnew[8];
 	size_t dnl = utf8_put(dnew, kitty_diac_table()[0]);
+	unsigned idhi = (unsigned) (cs->id >> 24) & 0xFF;
 	size_t i = 0, chunk = 0;
+	int after_ph = 0, ord = 0;
 
 	g_cbn = 0;
 	while (i < n) {
@@ -494,6 +543,8 @@ static size_t canon_build(const uint8_t *in, size_t n,
 				cb_emit(in + i, adv);
 			}
 			i += adv;
+			after_ph = 0;
+			ord = 0;
 			continue;
 		}
 		/* the single truecolor id-carrier SGR */
@@ -517,15 +568,46 @@ static size_t canon_build(const uint8_t *in, size_t n,
 			if (fields == 3) {
 				cb_emit("38;2;0;0;32", 11);
 				cs->sgr++;
+				after_ph = 0;
+				ord = 0;
 				i = j;
 				continue;
 			}
 		}
-		if (i + dol <= n && memcmp(in + i, dold, dol) == 0) {
-			cb_emit(dnew, dnl);
-			cs->diac++;
-			i += dol;
+		/* a placeholder cell opens a fresh diacritic group */
+		if (i + 4 <= n && memcmp(in + i, "\xF4\x8E\xBB\xAE", 4) == 0) {
+			cb_emit(in + i, 4);
+			after_ph = 1;
+			ord = 0;
+			i += 4;
 			continue;
+		}
+		if (after_ph) {
+			uint32_t cp;
+			size_t cadv = 0;
+
+			/* the id-high rewrite is POSITIONAL (third
+			 * diacritic of a group only): the old blanket byte
+			 * rewrite also ate a row diacritic in the rare run
+			 * whose id-high coincides with a low row index */
+			if (canon_utf8(in, n, i, &cp, &cadv) == 0) {
+				int tidx = canon_diag_index(cp);
+
+				if (tidx >= 0) {
+					ord++;
+					if (ord == 3 && (unsigned) tidx == idhi) {
+						cb_emit(dnew, dnl);
+						cs->diac++;
+					} else
+						cb_emit(in + i, cadv);
+					if (ord == 3) {
+						after_ph = 0;
+						ord = 0;
+					}
+					i += cadv;
+					continue;
+				}
+			}
 		}
 		cb_emit(in + i, 1);
 		i++;
@@ -605,7 +687,7 @@ static int cmp_artefact(const char *what, const uint8_t *have, size_t hsz,
 {
 	struct stat st;
 	uint8_t *want = NULL;
-	size_t wsz = 0, shown = 0, n;
+	size_t wsz = 0, shown = 0, difn = 0, n;
 	int rc = 1;
 
 	if (stat(path, &st) != 0) {
@@ -631,14 +713,21 @@ static int cmp_artefact(const char *what, const uint8_t *have, size_t hsz,
 			hsz, wsz);
 	} else {
 		for (size_t i = 0; i < n; i++)
-			if (have[i] != want[i] && shown < 8) {
+			if (have[i] != want[i]) {
+				difn++;
+				if (shown >= 8)
+					continue;
 				fprintf(stderr,
 					"  %s: diff @%zu have=0x%02x "
 					"want=0x%02x\n",
 					what, i, have[i], want[i]);
 				shown++;
 			}
-		rc = 0;
+		if (difn)
+			fprintf(stderr,
+				"  %s: %zu differing byte(s) total\n",
+				what, difn);
+		rc = (difn > 0) ? 1: 0;
 	}
 	free(want);
 	return rc;
@@ -955,6 +1044,10 @@ int main(int argc, char *argv[])
 	{
 		pid_t r;
 
+		if (!dead)
+			kill(pid, SIGKILL); /* the guard tripped with a live
+					     * child: never block the reap on
+					     * a hung app */
 		do
 			r = waitpid(pid, &st, 0);
 		while (r < 0 && errno == EINTR);

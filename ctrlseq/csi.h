@@ -333,6 +333,8 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 		term->attribute     = ATTR_RESET;
 		term->color_pair.fg = DEFAULT_FG;
 		term->color_pair.bg = DEFAULT_BG;
+		term->tc_fg_on      = false;
+		term->tc_bg_on      = false;
 		return;
 	}
 
@@ -344,6 +346,7 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 			term->attribute = ATTR_RESET;
 			term->color_pair.fg = DEFAULT_FG;
 			term->color_pair.bg = DEFAULT_BG;
+			term->tc_fg_on = term->tc_bg_on = false;
 		} else if (1 <= num && num <= 7) {     /* set attribute */
 			term->attribute |= attr_mask[num];
 		} else if (num == 22) {
@@ -355,52 +358,71 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 		} else if (21 <= num && num <= 27) {   /* reset attribute */
 			term->attribute &= ~attr_mask[num - 20];
 		} else if (30 <= num && num <= 37) {   /* set foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = (num - 30);
 		} else if (num == 38) {                /* special foreground color selection */
 			/* select foreground color from 256 color index */
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
+				term->tc_fg_on = false;
 				term->color_pair.fg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select foreground color from specified rgb color. The exact
-			 * value parks in the reserved dynamic slot (shadowing palette
-			 * entry 254) so the kitty placeholder id encoding - which is a
-			 * truecolor SGR - can be read back unquantized. */
+			/* select foreground color from specified rgb color. The cell
+			 * stores the stable quantized index (rgb2index), so a later
+			 * SGR can never recolor an existing cell; the exact value
+			 * parks in tc_fg (see set_attr notes in cruft.h) only so the
+			 * kitty placeholder id encoding - which is a truecolor SGR -
+			 * can be read back unquantized. */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
 				int fr = dec2num(parm->argv[i + 2]);
 				int fg = dec2num(parm->argv[i + 3]);
 				int fb = dec2num(parm->argv[i + 4]);
 
-				term->virtual_palette[KITTY_DYN_FG] =
-					(((fr & 0xFF) << 16) | ((fg & 0xFF) << 8) | (fb & 0xFF));
-				term->color_pair.fg = KITTY_DYN_FG;
+				term->tc_fg_rgb = ((((uint32_t) fr & 0xFF) << 16)
+						     | (((uint32_t) fg & 0xFF) << 8)
+						     | ((uint32_t) fb & 0xFF));
+				term->tc_fg_on    = true;
+				term->color_pair.fg = rgb2index((uint8_t) fr,
+								  (uint8_t) fg,
+								  (uint8_t) fb);
 				i += 4;
 			}
 		} else if (num == 39) {                /* reset foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = DEFAULT_FG;
 		} else if (40 <= num && num <= 47) {   /* set background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = (num - 40);
 		} else if (num == 48) {                /* special background  color selection */
 			/* select background color from 256 color index */
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
+				term->tc_bg_on = false;
 				term->color_pair.bg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select background color from specified rgb color (dynamic
-			 * slot, see the 38;2 case above) */
+			/* select background color from specified rgb color (live value
+			 * kept for blends and id decoding, see the 38;2 case
+			 * above) */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
 				int br = dec2num(parm->argv[i + 2]);
 				int bgc = dec2num(parm->argv[i + 3]);
 				int bb = dec2num(parm->argv[i + 4]);
 
-				term->virtual_palette[KITTY_DYN_BG] =
-					(((br & 0xFF) << 16) | ((bgc & 0xFF) << 8) | (bb & 0xFF));
-				term->color_pair.bg = KITTY_DYN_BG;
+				term->tc_bg_rgb = ((((uint32_t) br & 0xFF) << 16)
+						     | (((uint32_t) bgc & 0xFF) << 8)
+						     | ((uint32_t) bb & 0xFF));
+				term->tc_bg_on    = true;
+				term->color_pair.bg = rgb2index((uint8_t) br,
+								 (uint8_t) bgc,
+								 (uint8_t) bb);
 				i += 4;
 			}
 		} else if (num == 49) {                /* reset background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = DEFAULT_BG;
 		} else if (90 <= num && num <= 97) {   /* set bright foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = (num - 90) + BRIGHT_INC;
 		} else if (100 <= num && num <= 107) { /* set bright background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = (num - 100) + BRIGHT_INC;
 		}
 	}

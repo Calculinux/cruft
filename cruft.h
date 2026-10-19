@@ -52,8 +52,6 @@ enum misc {
 	BRIGHT_INC         = 8,                /* value used for brightening color */
 	SB_TITLE_MAX       = 48,               /* status bar window title length (excl. NUL) */
 	SBDISK_CACHE_ROWS  = 8,                /* decoded disk rows held in RAM (sbdisk.c) */
-	KITTY_DYN_FG       = 254,              /* palette slot shadowed by truecolor fg SGR */
-	KITTY_DYN_BG       = 255,              /* palette slot shadowed by truecolor bg SGR */
 	KITTY_PH_CODE      = 0x10EEEE,         /* kitty Unicode placeholder (private use) */
 };
 
@@ -110,8 +108,8 @@ struct esc_t {
 	char *bp;
 	int size;
 	enum esc_state state;
-	/* which string introduced the DCS body: 0 = ESC P (sixel et al),
-	 * '+' = kitty graphics, '_' = kitty APC (_G) graphics */
+	/* which string introduced the body: 0 = ESC P (traditional DCS:
+	 * sixel, DECDLD), '_' = kitty APC (ESC _ G) graphics */
 	uint8_t dcs_kind;
 };
 
@@ -249,7 +247,8 @@ struct kitty_ph {
 	int nd;
 	unsigned d[3];
 	unsigned ax, ay;        /* cell the placeholder occupied */
-	unsigned fg;            /* SGR fg at the placeholder cell */
+	uint32_t rgb;           /* live truecolor fg at the placeholder cell */
+	bool fg_tc;             /* true iff that fg was a live truecolor SGR */
 	struct {
 		bool on;
 		uint32_t id;
@@ -274,6 +273,14 @@ struct terminal_t {
 	struct charset_t charset;                /* store UTF-8 byte stream */
 	struct esc_t esc;                        /* store escape sequence */
 	uint32_t virtual_palette[COLORS];        /* virtual color palette: always 32bpp */
+	/* Live values of the current truecolor SGR colours (38;2 / 48;2).
+	 * Cells store only the stable quantized palette index (rgb2index),
+	 * so a later SGR can never recolor a cell that is already on the
+	 * screen; the exact value parks here solely so a kitty image id,
+	 * which rides in a truecolor SGR, can be decoded unquantized.
+	 * Each *_on flag is cleared by any SGR that changes that colour. */
+	uint32_t tc_fg_rgb, tc_bg_rgb;
+	bool     tc_fg_on, tc_bg_on;
 	bool palette_modified;                   /* true if palette changed by OSC 4/104 */
 	char win_title[SB_TITLE_MAX + 1];        /* window title set via OSC 0/2 */
 	/* glyphs: demand-paged via glyph_get()/glyph_lookup() */

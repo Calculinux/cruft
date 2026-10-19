@@ -569,7 +569,11 @@ static void fb_scrollbar(struct framebuffer_t *fb, struct terminal_t *term)
 	th = (bh * term->lines) / (term->lines + (int)total);
 	if (th < 1)
 		th = 1;
-	rel = ((bh - th) * (int)term->sb.view) / (int)total;
+	/* The thumb follows the document metaphor: view 0 is the live
+	 * tail (newest rows, bottom of the document) and view == total
+	 * the oldest row (top), so the offset scales with (total-view),
+	 * not view. */
+	rel = ((bh - th) * (int)(total - term->sb.view)) / (int)total;
 
 	track = fb->real_palette[8];
 	thumb = fb->real_palette[7];

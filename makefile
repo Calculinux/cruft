@@ -6,10 +6,10 @@ LDFLAGS ?=
 ASAN_CFLAGS = $(WARNFLAGS) -O1 -g -fsanitize=address -fno-omit-frame-pointer
 ASAN_LDFLAGS = -fsanitize=address
 
-SRCS = cruft.c glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c terminal_cell.c scrollback.c sbdisk.c status.c
+SRCS = cruft.c glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
 # Standalone translation units tidy/cppcheck can analyze without fb/VT headers
 # (status.c includes the fb type shapes, so it stays out of LINT_SRCS).
-LINT_SRCS = glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c terminal_cell.c scrollback.c sbdisk.c tools/mkcruftfont.c
+LINT_SRCS = glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c terminal_cell.c scrollback.c sbdisk.c conf.c tools/mkcruftfont.c
 HDR = glyph.h cruft.h conf.h color.h parse.h terminal.h util.h status.h \
 	ctrlseq/esc.h ctrlseq/csi.h ctrlseq/osc.h ctrlseq/dcs.h \
 	fb/common.h fb/linux.h fb/fb.h
@@ -18,11 +18,11 @@ DESTDIR   =
 PREFIX    = $(DESTDIR)/usr
 MANPREFIX = $(DESTDIR)/usr/share/man
 
-TEST_SRCS = tests/selftest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c
+TEST_SRCS = tests/selftest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
 # Same engine TUs as TEST_SRCS with the golden-pixel driver instead of
 # selftest.c. Flat on purpose: the Yocto recipe extracts the TEST_SRCS
 # line verbatim, so keep both lists spelled out.
-GOLDEN_SRCS = tests/golden_main.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c
+GOLDEN_SRCS = tests/golden_main.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
 TEST_CFLAGS = $(WARNFLAGS) -O0 -g -I.
 
 # Optional system libpng: PNG payloads on the kitty graphics path (File;).
@@ -100,7 +100,7 @@ tests/golden: $(GOLDEN_SRCS) $(HDR)
 # replays dependency-free.
 # Optional: `make test` never depends on this. To refreeze the trio:
 #   ./tests/apptest --update <asset-bin> <png>
-APPT_SRCS = tests/apptest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c
+APPT_SRCS = tests/apptest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
 
 tests/apptest: $(APPT_SRCS) $(HDR)
 	$(CC) -o $@ $(APPT_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)

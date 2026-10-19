@@ -378,6 +378,9 @@ void reset(struct terminal_t *term)
 	screen_clear(term);
 	term->state.cursor = active_screen(term)->cursor;
 
+	/* RIS is a hard reset of everything the user sees, title included. */
+	term->win_title[0] = '\0';
+	statusbar_invalidate();
 	reset_esc(term);
 	reset_charset(term);
 
@@ -426,8 +429,7 @@ void enter_alt_screen(struct terminal_t *term)
 	/* graphics: the app's frame hides every placement, and a transfer
 	 * in flight cannot survive the switch */
 	kitty_ph_invalidate(term);
-	kitty_xfer_abort(term);
-}
+	kitty_xfer_abort(term);}
 
 void leave_alt_screen(struct terminal_t *term)
 {
@@ -441,8 +443,7 @@ void leave_alt_screen(struct terminal_t *term)
 	prim->scroll = term->alt_saved.scroll;
 	sixel_canvas_free(term);
 	kitty_ph_invalidate(term);
-	kitty_xfer_abort(term);
-	/* Repaint the restored primary over the app's frame: the FB pixels
+	kitty_xfer_abort(term);	/* Repaint the restored primary over the app's frame: the FB pixels
 	 * still show the alt screen, so every primary line goes dirty. */
 	redraw(term);
 }
@@ -489,7 +490,9 @@ bool term_init(struct terminal_t *term, int width, int height)
 	term->scr[1]    = (struct screen_t) {0};
 	term->alt_saved = (struct alt_saved_t) {0};
 	term->sb        = (struct scrollback_t) {0};
-
+	term->sb.disk.fd = -1; /* zeroed-struct guard (cf. sb_init): the
+			       * OOM die path below must never close()
+			       * what reads as stdin */
 	/* allocate memory (primary screen only) */
 	term->esc.buf      = (char *) ecalloc(1, term->esc.size);
 	term->sixel.pixmap = NULL; /* lazy: sixel_canvas_ensure on first sixel */

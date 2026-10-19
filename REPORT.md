@@ -415,3 +415,40 @@ Each cost iterations; listed so the next round does not repay them.
 - Diagnostic dumps (best-effort, `/tmp/apptest-debug.*`) are written
   beside each ladder rung that fails, so any future regression
   presents its own evidence.
+
+## 9. Stack integration: merging `feat/etcc` (PR #11's head)
+
+The branch descends from a local parallel rework of the #8/#10 layers
+(scrollback, sbdisk, screen split) that never went through remote review;
+PR #11 (`feat/etcc`) ships the reviewed versions of those same layers.
+The merge therefore resolves almost entirely in favour of the remote:
+
+- **Taken from etcc verbatim:** `scrollback.c`, `sbdisk.c`, `conf.c` /
+  `conf.h` (new config layer + selftest V section), the T/U test
+  refinements (prefix-cap hold, thumb direction pinned at view == total,
+  wide-grid degradation), the man-page status-bar wording. Known
+  behavioural deltas absorbed, not patched around: the scrollbar thumb
+  now scales with (total − view), and the sbdisk blank row is the
+  session row grown at attach instead of growing on post-attach widen.
+- **Unioned (etcc state + this branch's content):** `parse.h` (etcc's
+  OSC 0/2 title extraction alongside the OSC 1337-removal note, §5),
+  `terminal.h` (disjoint additions on both sides), `makefile` /
+  `cruft.h` / `.gitignore` (supersets; `conf.c` added to every flat
+  engine-TU list), `tests/selftest.c` (their V section, their T/U
+  refinements, this branch's W section — ordered U → V → W, the cr()
+  no-op stub dropped because W's unity include of `ctrlseq/esc.h`
+  supplies the real definition).
+- **Goldens:** the thumb-formula change touches no frozen scene; all 12
+  golden artefacts reproduce byte-identical after the merge (canary).
+
+Post-merge verification (2026-10-19, clean tree): full build of every
+binary, `make test` (selftest incl. the new V section and W end-to-end),
+`make lint` (all TU groups, `-Werror`), `tests/golden` 5/5 twice,
+`make apptest-live` twice with distinct client-random transfer ids —
+canonical trace 32 694 B byte-identical to the frozen golden both runs,
+live reply == replay reply (54 B).
+
+Follow-up against PR #10 (not this branch): sbdisk's blank row does not
+regrow when the grid widens after attach; a resize past the attach width
+falls back to the RAM-tier row and would need the session row resized.
+File as a defect on the sb-disk PR, not as a blocker here.

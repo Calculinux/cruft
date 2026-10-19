@@ -108,20 +108,41 @@ mapping, nav keys, the pixmap cap and the disabled mode.
 
 An 8px strip in the top margin, above the cell grid, rendered in the
 4x8 status font (miniwi; `CRUFT_SB_FONT`, default
-`/usr/share/cruft/status.cruftfont`): clock centre, wifi stair +
-battery right. `term_init` shrinks the grid by
+`/usr/share/cruft/status.cruftfont`): window title left, clock centre,
+wifi stair + battery right. `term_init` shrinks the grid by
 `statusbar_h()` pixels (320x320 + 6x12 font: 26 lines, no loss).
 
 - Data: sysfs `power_supply`/`net` (`operstate`) and the Level column of
   `/proc/net/wireless` for the signal dBm (see the TODO(signal) in
   `status.c` before revisiting nl80211), polled once per second; the
   strip repaints only when the rendered content changes.
+- Window title: the parser (`osc_sequence` in `parse.h`) captures the
+  foreground program's window title (OSC 0/2 — the channel xterm-style
+  emulators show in their title bars; mode 1, icon only, has no home
+  on a framebuffer and is dropped) into `term->win_title`, sanitized
+  to printable ASCII by `sb_title_set` at capture (byte-oriented UTF-8
+  consumption, no locale: the 4x8 status font covers no non-ASCII
+  glyphs, so accents/CJK would render as holes). The raw payload is
+  snapshotted before `parse_arg` NUL-splits the esc buffer, since a
+  title may contain `;`. Cleared on RIS; not part of save/restore
+  (ESC 7/8). The left run is clamped by `sb_fit_left` to one cell
+  short of the centred clock.
 - Each source degrades independently: absent source hides its segment;
   no signal reading degrades the stair to on/off; a missing status font
   disables the bar and the grid reclaims the strip.
-- `CRUFT_SB` selects segments (`time,wifi,battery`, `all`, `none`);
+- `CRUFT_SB` selects segments (`time,wifi,battery,title`, `all`,
+  `none`);
   `CRUFT_SB_12H=1` switches the clock to 12h. Compile-time
   default: `sb_default_segments` in `conf.h`.
+- Configuration (`conf.c`): `/etc/cruft.conf` (KEY=VALUE, `#`
+  comments) supplies persistent defaults for the `CRUFT_FONT`,
+  `CRUFT_SB`, `CRUFT_SB_FONT`, `CRUFT_SB_12H`, `CRUFT_HISTORY` and
+  `CRUFT_SB_RAM` knobs. Precedence: environment > file > built-in
+  constant, so a per-service `Environment=` line or an exported
+  variable still wins. `conf_load()` runs before the first consumer
+  (font). Unknown keys and malformed values are skipped with a WARN —
+  a bad line must never take the console down. Selftest section V
+  covers grammar, validity and precedence.
 - Dual-font: `glyph_sb_*` in `glyph_mmap.c` is a second instance of the
   demand-paged `CRUFTFN1` loader (4x8/24 metrics only); the main font
   path is untouched. FB type shapes live in `fb/fb.h` (definitions-free,

@@ -26,7 +26,6 @@
 #include "ctrlseq/osc.h"
 #include "ctrlseq/dcs.h"
 #include "parse.h"
-
 const uint32_t color_list[COLORS];
 
 const uint8_t attr_mask[] = {
@@ -51,7 +50,6 @@ const char *sb_default_segments = "all";
 /* NOTE: move_cursor / cr / set_cursor / scroll are the REAL functions
  * (terminal.h, included above) — no no-op stubs: the W section asserts
  * kitty placement cursor bookkeeping through them. */
-
 static int failures;
 
 /* M-section fixtures: PicoCalc-style 320x320 framebuffer, 4bpp, truecolor */
@@ -1024,6 +1022,99 @@ int main(void)
 			"O absent sources hidden");
 	}
 
+	/* P: status bar window title (OSC 0/2 capture + left-zone fit) */
+	{
+		int unk = 0;
+		struct sb_state st;
+		struct sb_draw d;
+		char title[SB_TITLE_MAX + 1];
+
+		/* segment keyword */
+		expect(sb_parse_segments("title", &unk) != 0, "P parse title");
+		expect((sb_parse_segments("all", &unk) &
+			sb_parse_segments("title", &unk)) != 0,
+			"P all has title");
+		expect(sb_parse_segments("title,time", &unk) ==
+			(sb_parse_segments("title", &unk) |
+			 sb_parse_segments("time", &unk)),
+			"P parse title combines");
+
+		/* title capture: printable ASCII kept, everything else dropped */
+		memset(title, 0, sizeof title);
+		expect(sb_title_set(title, "pico@calc: ~/src$ vim main.c") == 1,
+			"P set returns changed");
+		expect(strcmp(title, "pico@calc: ~/src$ vim main.c") == 0,
+			"P ascii kept");
+		expect(sb_title_set(title, "pico@calc: ~/src$ vim main.c") == 0,
+			"P same content not changed");
+		expect(sb_title_set(title, "abc") == 1 && strcmp(title, "abc") == 0,
+			"P shorter replaces longer");
+		expect(sb_title_set(title, "") == 1 && title[0] == '\0',
+			"P empty payload clears");
+
+		expect(sb_title_set(title, "a\tb\nc" "\x01" "d\177e") == 1,
+			"P controls");
+		expect(strcmp(title, "abcde") == 0, "P controls and DEL dropped");
+
+		expect(sb_title_set(title, "caf" "\xc3\xa9") == 1, "P accent in");
+		expect(strcmp(title, "caf") == 0, "P non-ASCII char dropped");
+		expect(sb_title_set(title, "a" "\xe6\xbc\xa2" "b" "\xed\xa0\x80" "c")
+			== 1, "P mixed in");
+		expect(strcmp(title, "abc") == 0, "P CJK + surrogate dropped");
+
+		/* malformed sequences shed bytes, never emit them */
+		expect(sb_title_set(title, "xy" "\xc3") == 1, "P dangling lead in");
+		expect(strcmp(title, "xy") == 0, "P dangling lead dropped");
+		expect(sb_title_set(title, "p" "\x80" "q") == 1, "P lone cont in");
+		expect(strcmp(title, "pq") == 0, "P lone continuation dropped");
+		expect(sb_title_set(title, "a" "\xc0\xaf" "b") == 1, "P overlong in");
+		expect(strcmp(title, "ab") == 0, "P overlong lead dropped");
+		expect(sb_title_set(title, "z" "\xf8\x88\x80\x80\x80" "w") == 1,
+			"P 5-byte in");
+		expect(strcmp(title, "zw") == 0, "P 5-byte sequence dropped");
+
+		/* truncation at the buffer cap, NUL-terminated */
+		{
+			char long_in[SB_TITLE_MAX + 4];
+
+			memset(long_in, 'x', sizeof long_in);
+			long_in[sizeof long_in - 1] = '\0';
+			expect(sb_title_set(title, long_in) == 1, "P oversize in");
+			expect(strlen(title) == SB_TITLE_MAX, "P truncated at cap");
+		}
+
+		/* left-zone fit: one blank cell short of the centered run */
+		expect(sb_fit_left(10, 5, 80) == 10, "P fit: short left wins");
+		expect(sb_fit_left(50, 5, 80) == 36,
+			"P fit: clamped (center 37..41, gap 36)");
+		expect(sb_fit_left(10, 5, 10) == 1, "P fit: tight strip");
+		expect(sb_fit_left(10, 9, 10) == 0, "P fit: no room");
+		expect(sb_fit_left(10, 10, 10) == 0, "P fit: center eats strip");
+		expect(sb_fit_left(10, 12, 10) == 0,
+			"P fit: center wider than strip");
+		expect(sb_fit_left(0, 5, 80) == 0, "P fit: empty left");
+		expect(sb_fit_left(5, 0, 4) == 1, "P fit: gap respected");
+
+		/* builder: title goes to the left zone */
+		memset(&st, 0, sizeof st);
+		st.now = 0;
+		st.title = "Hello World";
+		sb_build_items(&st, sb_parse_segments("title", &unk), 0, 0, &d);
+		expect(d.left.n == 11 && d.left.it[0].cp == 'H' &&
+			d.left.it[10].cp == 'd',
+			"P left zone holds title");
+		expect(d.left.it[0].col == 7, "P title light grey");
+		expect(d.center.n == 0 && d.right.n == 0, "P title only");
+		sb_build_items(&st, sb_parse_segments("time", &unk), 0, 0, &d);
+		expect(d.left.n == 0, "P title hidden when segment off");
+		st.title = "";
+		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
+		expect(d.left.n == 0, "P empty title hidden");
+		st.title = NULL;
+		sb_build_items(&st, sb_parse_segments("all", &unk), 0, 0, &d);
+		expect(d.left.n == 0, "P null title hidden");
+	}
+
 	/* Q: status bar + grid shift on the PicoCalc 320x320 (bar on).
 	 * 6x12 main: oy=8, lines=(320-8)/12=26; grid rows 8..319, no bottom
 	 * strip (8 + 26*12 == 320). Strip: clock center (5 solid glyphs),
@@ -1546,6 +1637,41 @@ int main(void)
 				"T broken prefix forwarded, view snaps");
 		}
 
+		/* The prefix search stays anchored at the TRUE end of the
+		 * input even when foreign bytes precede it: only the
+		 * candidate length is capped, the suffix offset is not.
+		 * Foreign bytes snap the view (the user typed); the
+		 * trailing prefix is STILL held, so a page key completed
+		 * in the next read intercepts from the tail. */
+		{
+			const uint8_t esc_after5[] = { 'a', 'b', 'c', 'd', 'e', ESC };
+			const uint8_t pg_tail6[]   = { 'x', 'x', 'x', ESC, '[', '5' };
+			const uint8_t foreign6[]   = { 'a', 'b', 'c', 'd', 'e', 'f' };
+			const uint8_t pg_rest[]     = { '[', '5', '~' };
+			uint8_t st[16];
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, esc_after5, 6, &carry) == 0
+				   && carry == 1 && term.sb.view == 0,
+				"T lone ESC held after 5 foreign bytes");
+			/* the held ESC + the split page-up completing it in
+			 * the next read must still intercept */
+			st[0] = esc_after5[5];
+			memcpy(st + 1, pg_rest, sizeof(pg_rest));
+			expect(sb_consume_nav(&term, st,
+					      (int)(1 + sizeof(pg_rest)),
+					      &carry) == 4
+				   && carry == 0 && term.sb.view > 0,
+				"T held ESC after long input completes to page-up");
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, pg_tail6, 6, &carry) == 0
+				   && carry == 3 && term.sb.view == 0,
+				"T page-up tail held after 3 foreign bytes");
+			expect(sb_consume_nav(&term, foreign6, 6, &carry) == 0
+				   && carry == 0 && term.sb.view == 0,
+				"T all-foreign run forwards, view snaps");
+		}
 		/* Back to the tail: stored rows leave the live lines clean, so
 		 * every line must be re-flagged or the lazy painter would
 		 * keep history pixels on screen. */
@@ -1626,10 +1752,12 @@ int main(void)
 
 		/* Bar geometry on 320x320: the first stored row anchors the
 		 * grid left (x0 is grid, not margin) and the 2px slider rides
-		 * the right edge; track palette 8, thumb palette 7. With
-		 * count 2 / view 1: thumb height 312*26/28 = 289, offset
-		 * (312-289)/2 = 11, so thumb spans y 11..299. */
-		memset(&term, 0, sizeof(term));
+		 * the right edge; track palette 8, thumb palette 7. Direction
+		 * is pinned with view == total (the OLDEST row, top of the
+		 * document): thumb height 312*26/28 = 289, offset
+		 * (312-289)*(2-2)/2 = 0, so the thumb spans y 0..288 (a
+		 * view-scaled, not total-view-scaled, offset would put it at
+		 * y 23..311 for this state). */		memset(&term, 0, sizeof(term));
 		expect(alloc_term_grid(&term, M_W, M_H) == 0, "T bar fixture 53x26");
 		{
 			struct framebuffer_t fbm;
@@ -1653,8 +1781,10 @@ int main(void)
 			term.sb.cap = 4;
 			term.sb.count = 2;
 			term.sb.head = 2;
-			term.sb.view = 1;
-			term.sb.rows = (struct cell_t **) ecalloc(4, sizeof(*term.sb.rows));
+			term.sb.view = 2; /* == total: browsing the oldest row */
+			term.sb.disk.fd = -1; /* mirror term_init(): the zeroed
+						* sb must not read as stdin when
+						* term_die tears the tier down */			term.sb.rows = (struct cell_t **) ecalloc(4, sizeof(*term.sb.rows));
 			term.sb.rows[0] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
 			term.sb.rows[1] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
 			expect(term.sb.rows && term.sb.rows[0] && term.sb.rows[1], "T ring synth");
@@ -1688,8 +1818,7 @@ int main(void)
 			refresh(&fbm, &term);
 			expect(m_px_at(mfp, 0, 0) == 0x01010101u, "T grid anchored left");
 			expect(m_px_at(mfp, 317, 0) == 0x01010101u, "T grid reaches x317");
-			expect(m_px_at(mfp, 318, 5) == 0x08080808u, "T bar track (above thumb)");
-			expect(m_px_at(mfp, 319, 100) == 0x07070707u, "T bar thumb");
+			expect(m_px_at(mfp, 318, 5) == 0x07070707u, "T bar thumb pinned to the top (oldest row)");			expect(m_px_at(mfp, 319, 100) == 0x07070707u, "T bar thumb");
 			expect(m_px_at(mfp, 318, 305) == 0x08080808u, "T bar track (below thumb)");
 			expect(m_px_at(mfp, 318, 315) == 0x00000000u, "T below grid is margin, not bar");
 			free(mfp);
@@ -1835,6 +1964,46 @@ int main(void)
 		}
 		term_die(&term);
 
+		/* A grid wider than the 512-cell static fallback: a
+		 * degraded tier must still serve a blank row spanning
+		 * term->cols. Only the session row - which outlives
+		 * teardown - can satisfy that; the old static read OOB
+		 * (proven by the ASan lane). */
+		setenv("CRUFT_HISTORY", "12", 1);
+		setenv("CRUFT_SB_RAM", "2", 1);
+		expect(term_init(&term, 3200, 96), "U wide term_init");
+		expect(term.cols > 512,
+			"U wide grid exceeds the static fallback");
+		for (int i = 0; i < 12; i++) {
+			int y = term.lines - 1;
+
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.disk.count > 0, "U wide spill engaged");
+		{
+			int cfd = open(term.sb.disk.path, O_RDWR);
+
+			expect(cfd >= 0 && ftruncate(cfd, 21) == 0 && !close(cfd),
+				"U wide corruption prepared");
+		}
+		{
+			const struct cell_t *r;
+
+			term.sb.view = 12; /* window top = oldest = disk */
+			r = sb_view_row(&term, 0);
+			expect(r != NULL
+				&& r[512].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[512].has_pixmap == false
+				&& r[term.cols - 1].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[term.cols - 1].width == HALF,
+				"U degraded blank row spans the wide grid");
+			expect(sb_history_total(&term) == 2,
+				"U wide tier degraded: RAM only");
+		}
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+		unsetenv("CRUFT_SB_RAM");
 		/* pixmaps survive the trip to disk: total 6, RAM 2, disk 4 */
 		setenv("CRUFT_HISTORY", "6", 1);
 		setenv("CRUFT_SB_RAM", "2", 1);
@@ -1883,6 +2052,106 @@ int main(void)
 		unsetenv("CRUFT_SB_RAM");
 	}
 
+	/* V: /etc/cruft.conf loader (conf.c): grammar, validity, and
+	 * environment precedence. */
+	{
+		static const char *vkeys[6] = {
+			"CRUFT_FONT", "CRUFT_SB", "CRUFT_SB_FONT",
+			"CRUFT_SB_12H", "CRUFT_HISTORY", "CRUFT_SB_RAM",
+		};
+		char *saved[6];
+		char tp[64];
+
+		for (int i = 0; i < 6; i++) {
+			const char *v = getenv(vkeys[i]);
+
+			saved[i] = (v == NULL) ? NULL: strdup(v);
+			unsetenv(vkeys[i]);
+		}
+		snprintf(tp, sizeof(tp), "/tmp/cruft-conf-%d", (int) getpid());
+		conf_load_file("/nonexistent/cruft.conf-V");
+		expect(getenv("CRUFT_HISTORY") == NULL, "V missing file is a no-op");
+
+		FILE *cf;
+		unlink(tp);
+		cf = fopen(tp, "w");
+		expect(cf != NULL, "V temp path ready");
+		fputs("# V well-formed config\n"
+		      "CRUFT_FONT=/x.fnt\n"
+		      "CRUFT_SB=time,battery\n"
+		      "CRUFT_SB_FONT=/s.fnt\n"
+		      "CRUFT_SB_12H=1\n"
+		      "  CRUFT_HISTORY = 8192  \n"
+		      "CRUFT_SB_RAM=256\n", cf);
+		fclose(cf);
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_FONT"), "/x.fnt") == 0
+		       && strcmp(getenv("CRUFT_SB"), "time,battery") == 0
+		       && strcmp(getenv("CRUFT_SB_FONT"), "/s.fnt") == 0
+		       && strcmp(getenv("CRUFT_SB_12H"), "1") == 0,
+			"V font/SB knobs from file");
+		expect(strcmp(getenv("CRUFT_HISTORY"), "8192") == 0
+		       && strcmp(getenv("CRUFT_SB_RAM"), "256") == 0,
+			"V depth knobs (padding trimmed) from file");
+
+		setenv("CRUFT_HISTORY", "77", 1);
+		cf = fopen(tp, "a");
+		fputs("CRUFT_HISTORY=99\n", cf);
+		fclose(cf);
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_HISTORY"), "77") == 0,
+			"V environment beats file");
+		unsetenv("CRUFT_HISTORY");
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_HISTORY"), "99") == 0,
+			"V file value once env is clear");
+
+		cf = fopen(tp, "w");
+		fputs("\n   # only junk below\n"
+		      "CRUFT_HISTORY=abc\n"
+		      "CRUFT_SB=bad value\n"
+		      "CRUFT_SB_12H=2\n"
+		      "CRUFT_SB=\n"
+		      "NOT_A_KEY=1\n"
+		      "no equals here\n"
+		      "CRUFT_FONT\n", cf);
+		fclose(cf);
+		for (int i = 0; i < 6; i++)
+			unsetenv(vkeys[i]);
+		conf_load_file(tp);
+		for (int i = 0; i < 6; i++)
+			expect(getenv(vkeys[i]) == NULL,
+				"V invalid or unknown lines never installed");
+
+		/* Overlong physical line (>255 bytes) is discarded whole: a
+		 * KEY=VALUE wrapped past the fgets boundary must not surface
+		 * at the next read as if it were a new line, and parsing must
+		 * resume at the line after it. */
+		{
+			char pad[256];
+
+			memset(pad, '#', sizeof pad - 1);
+			pad[sizeof pad - 1] = '\0';
+			cf = fopen(tp, "w");
+			expect(cf != NULL, "V temp path rewritable");
+			fprintf(cf, "%sCRUFT_SB_12H=1\nCRUFT_SB_RAM=256\n", pad);
+			fclose(cf);
+			for (int i = 0; i < 6; i++)
+				unsetenv(vkeys[i]);
+			conf_load_file(tp);
+			expect(getenv("CRUFT_SB_12H") == NULL,
+				"V overlong line tail (wrapped key) drained");
+			expect(strcmp(getenv("CRUFT_SB_RAM"), "256") == 0,
+				"V line after an overlong one still parses");
+		}
+		unlink(tp);
+
+		for (int i = 0; i < 6; i++) {
+			if (saved[i] != NULL)
+				setenv(vkeys[i], saved[i], 1);
+			free(saved[i]);
+		}
+	}
 
 	/* W: kitty graphics transfer (APC _G / DCS +) end to end: probe,
 	 * chunked transfer, Unicode-placeholder display, a=p re-place,

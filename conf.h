@@ -22,6 +22,12 @@ enum {
 	REPLACEMENT_CHAR = 0x003F,
 };
 
+/* Persistent defaults file (conf.c): KEY=VALUE lines for the CRUFT_*
+ * environment knobs; environment wins over the file over these enums. */
+#define CONFIG_FILE "/etc/cruft.conf"
+void conf_load(void);
+void conf_load_file(const char *path);
+
 /* Scrollback: total depth (CRUFT_HISTORY), RAM tier depth
  * (CRUFT_SB_RAM), and per-record sixel payload kept on disk. */
 enum {

@@ -17,11 +17,17 @@ programs (vim, htop, less) run on their own buffer and leave the main
 screen intact when they exit.
 .PP
 When a status font is installed, cruft draws a status bar in the margin
-strip above the cell grid: the clock in the centre, and a wifi signal
-stair and battery indicator on the right. A segment whose data source is
-absent (bare hardware, VM) is hidden; a missing or unsuitable status
-font disables the bar entirely and the grid reclaims the full screen.
-.PP
+strip above the cell grid: the window title set by the foreground
+program on the left, the clock in the centre, and a wifi signal stair
+and battery indicator on the right. The title is the standard terminal
+window title (escape sequence OSC 0/2, the same channel xterm-style
+terminal emulators show in their title bars), so shells, editors and
+other programs announce the current file or command; an empty title
+clears it. Non-ASCII characters are dropped (the 4x8 status font has
+no such coverage), and the title is trimmed so it never overlaps the
+centred clock. A segment whose data source is absent (bare hardware,
+VM) is hidden; a missing or unsuitable status font disables the bar
+entirely and the grid reclaims the full screen..PP
 Lines that scroll off the top of the main screen are kept in a
 scrollback buffer (see
 .BR CRUFT_HISTORY ): the newest rows in RAM, and older ones in a
@@ -70,8 +76,7 @@ iTerm2 \fIImage ;\fP operators (query, delete, chunked upload, ...) are
 not implemented but are always answered with an
 .I ok=false
 \fIRep\fP reply, so clients that probe for them degrade instead of
-hanging.
-.SH KEYBOARD
+hanging..SH KEYBOARD
 .PP
 History navigation:
 .RS
@@ -124,9 +129,10 @@ framebuffer shadow buffer. See cruft_wall.
 .B CRUFT_SB
 Status bar segments: a comma-separated list of
 .B time ,
-.B wifi
+.B wifi ,
+.B battery
 and
-.BR battery ,
+.BR title ,
 or
 .B all
 (the default) to show every segment whose source is present,
@@ -164,6 +170,18 @@ Set to 1 for a 12-hour clock (\fIH:MMam/pm\fP); the default is
 Path to the 4x8 CRUFTFN1 status font
 (default /usr/share/cruft/status.cruftfont, installed by the
 miniwi-console package).
+.SH CONFIGURATION
+.PP
+Persistent defaults can be set in
+.B /etc/cruft.conf ,
+one \fIKEY=VALUE\fP per line (\fB#\fP comments, blank lines and
+whitespace around the \fB=\fP are ignored). The recognised keys are
+exactly the environment variables above; the built-in default applies
+when neither the file nor the environment sets a key. Precedence:
+environment (per-service \fBEnvironment=\fP, exported shell variable)
+overrides the file, which overrides the built-in. Unknown keys and
+malformed values are skipped with a warning; a missing or empty file
+changes nothing.
 .SH AUTHOR
 .PP
 Calculinux fork; upstream yaft by haru <uobikiemukot at gmail dot com>

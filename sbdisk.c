@@ -87,9 +87,13 @@ static uint64_t sbd_min_record(const struct terminal_t *term)
 	return sizeof(struct sbrec_hdr) + (uint64_t)term->cols * SBDISK_CELL + 2;
 }
 
-/* Width-sized blank row (see sbd_blank); session-scoped, dropped in
- * sbd_teardown. */
+/* Width-sized blank row (see sbd_blank); session-scoped. Deliberately
+ * NOT freed in sbd_teardown: the fetch failure path tears the tier down
+ * and only THEN hands out a blank row, and term->cols is unbounded -
+ * a wide framebuffer with a narrow font yields grids wider than any
+ * static. The row outlives the tier and is reclaimed with the process. */
 static struct cell_t *sbd_blk;
+static unsigned sbd_blk_cols;
 
 /* --- teardown --------------------------------------------------------- */
 
@@ -118,8 +122,6 @@ static void sbd_teardown(const struct terminal_t *term, struct sbdisk_t *sd, con
 	memset(sd, 0, sizeof *sd);
 	sd->cap = cap;
 	sd->fd = -1;
-	free(sbd_blk);
-	sbd_blk = NULL;
 	if (err)
 		fprintf(stderr, "cruft: scrollback-disk: %s\n", err);
 }
@@ -273,11 +275,11 @@ static int sbd_pack(const struct terminal_t *term, const struct cell_t *row,
 /* Blank row handed out when the disk tier cannot serve a line: erased
  * cells, no pixmaps. draw_line indexes term->cols cells, which nothing
  * bounds but framebuffer width / cell width, so the row is built at
- * attach for the real width and dropped with the session on teardown;
- * the fixed static below covers a blank request outside any session.
- * (The OOM-fetch path degrades - dropping the row - before serving
- * the blank, so it lands on the static: fine at real widths, which
- * fit it comfortably.) */
+ * attach for the real width and kept for the process (failure paths
+ * tear the tier down BEFORE serving the blank; see sbd_blk). It grows
+ * in place if the grid widens after attach. The fixed static below is
+ * the last resort when even that realloc fails (OOM) or a blank is
+ * requested outside any session. */
 #define SBDISK_BLANK_FALLBACK_COLS 512
 
 static struct cell_t sbd_blk_static[SBDISK_BLANK_FALLBACK_COLS];
@@ -297,13 +299,26 @@ static void sbd_blank_fill(struct cell_t *row, unsigned cols)
 
 static const struct cell_t *sbd_blank(const struct terminal_t *term)
 {
-	if (sbd_blk)
+	unsigned need = (term && term->cols > 0) ? term->cols: 1;
+
+	if (sbd_blk && sbd_blk_cols >= need)
 		return sbd_blk;
+	{
+		/* Grow on widening (a resize after attach): a row shorter
+		 * than the grid is the very fault this row prevents. */
+		struct cell_t *row = realloc(sbd_blk, (size_t)need * sizeof *row);
+
+		if (row) {
+			sbd_blk = row;
+			sbd_blank_fill(row, need);
+			sbd_blk_cols = need;
+			return row;
+		}
+	}
 	if (!sbd_blk_static_ready) {
 		sbd_blank_fill(sbd_blk_static, SBDISK_BLANK_FALLBACK_COLS);
 		sbd_blk_static_ready = true;
 	}
-	(void)term;
 	return sbd_blk_static;
 }
 
@@ -347,12 +362,16 @@ void sbdisk_attach(struct terminal_t *term)
 		return;
 	}
 	sd->off_alloc = 32;
-	sbd_blk = (struct cell_t *) malloc((size_t)term->cols * sizeof *sbd_blk);
-	if (!sbd_blk) {
-		sbd_degrade(term, "out of memory");
-		return;
+	if (!sbd_blk) { /* a re-attach keeps the session row (grown later
+			     if the grid widened; see sbd_blank) */
+		sbd_blk = (struct cell_t *) malloc((size_t)term->cols * sizeof *sbd_blk);
+		if (!sbd_blk) {
+			sbd_degrade(term, "out of memory");
+			return;
+		}
+		sbd_blank_fill(sbd_blk, term->cols);
+		sbd_blk_cols = term->cols;
 	}
-	sbd_blank_fill(sbd_blk, term->cols);
 	sd->evicted = 0;
 	sd->epoch = 0;
 }

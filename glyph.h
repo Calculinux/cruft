@@ -47,6 +47,15 @@ struct cruftfont_map {
 /* Terminal font (CRUFT_FONT, default /usr/share/cruft/console.cruftfont). */
 int glyph_mmap_init(const char *path);
 void glyph_mmap_die(void);
+
+/* Soft probe: would glyph_mmap_init() accept this path (structure,
+ * metrics whitelist, essential glyphs)? Runs on a throwaway map and
+ * never dies or prints; 1/0. conf.c uses it to refuse a file-supplied
+ * CRUFT_FONT before install so a bad /etc/cruft.conf value cannot stop
+ * startup (an explicit environment override still hard-fails in
+ * glyph_mmap_init()). */
+int glyph_main_font_usable(const char *path);
+
 const struct glyph_t *glyph_lookup(uint32_t code);
 const struct glyph_t *glyph_get(uint32_t code);
 

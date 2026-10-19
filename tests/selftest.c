@@ -2073,19 +2073,30 @@ int main(void)
 		expect(getenv("CRUFT_HISTORY") == NULL, "V missing file is a no-op");
 
 		FILE *cf;
+		char fntp[64];
+		char garb[64];
+
+		snprintf(fntp, sizeof(fntp), "/tmp/cruft-conf-%d-f.font",
+			 (int) getpid());
+		snprintf(garb, sizeof(garb), "/tmp/cruft-conf-%d-g.txt",
+			 (int) getpid());
+		expect(write_tiny_font(fntp) == 0, "V fixture font written");
 		unlink(tp);
 		cf = fopen(tp, "w");
 		expect(cf != NULL, "V temp path ready");
-		fputs("# V well-formed config\n"
-		      "CRUFT_FONT=/x.fnt\n"
-		      "CRUFT_SB=time,battery\n"
-		      "CRUFT_SB_FONT=/s.fnt\n"
-		      "CRUFT_SB_12H=1\n"
-		      "  CRUFT_HISTORY = 8192  \n"
-		      "CRUFT_SB_RAM=256\n", cf);
+		if (cf == NULL)
+			goto v_cleanup;
+		fprintf(cf, "# V well-formed config\n"
+		        "CRUFT_FONT=%s\n"
+		        "CRUFT_SB=time,battery\n"
+		        "CRUFT_SB_FONT=/s.fnt\n"
+		        "CRUFT_SB_12H=1\n"
+		        "  CRUFT_HISTORY = 8192  \n"
+		        "CRUFT_SB_RAM=256\n",
+			fntp);
 		fclose(cf);
 		conf_load_file(tp);
-		expect(strcmp(getenv("CRUFT_FONT"), "/x.fnt") == 0
+		expect(strcmp(getenv("CRUFT_FONT"), fntp) == 0
 		       && strcmp(getenv("CRUFT_SB"), "time,battery") == 0
 		       && strcmp(getenv("CRUFT_SB_FONT"), "/s.fnt") == 0
 		       && strcmp(getenv("CRUFT_SB_12H"), "1") == 0,
@@ -2096,6 +2107,9 @@ int main(void)
 
 		setenv("CRUFT_HISTORY", "77", 1);
 		cf = fopen(tp, "a");
+		expect(cf != NULL, "V temp path appendable");
+		if (cf == NULL)
+			goto v_cleanup;
 		fputs("CRUFT_HISTORY=99\n", cf);
 		fclose(cf);
 		conf_load_file(tp);
@@ -2106,10 +2120,50 @@ int main(void)
 		expect(strcmp(getenv("CRUFT_HISTORY"), "99") == 0,
 			"V file value once env is clear");
 
+		/* A blank between segments is exactly what
+		 * sb_parse_segments() squeezes into commas: the loader
+		 * installs "time, battery" verbatim instead of refusing
+		 * it and leaving the default selection in effect. */
+		cf = fopen(tp, "a");
+		expect(cf != NULL, "V temp path appendable (2)");
+		if (cf == NULL)
+			goto v_cleanup;
+		fputs("CRUFT_SB=time, battery\n", cf);
+		fclose(cf);
+		unsetenv("CRUFT_SB"); /* the first load installed "time,battery" */
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_SB"), "time, battery") == 0,
+			"V SB list with a space installs verbatim");
+
+		/* A file-supplied CRUFT_FONT that glyph_mmap_init() would
+		 * choke on (missing file, or an existing file that is not
+		 * a font) must be refused so the built-in font stands;
+		 * the last valid line wins, so the garbage file decides. */
+		cf = fopen(garb, "w");
+		expect(cf != NULL, "V garbage path writable");
+		if (cf == NULL)
+			goto v_cleanup;
+		fputs("not a font\n", cf);
+		fclose(cf);
+		cf = fopen(tp, "a");
+		expect(cf != NULL, "V temp path appendable (3)");
+		if (cf == NULL)
+			goto v_cleanup;
+		fprintf(cf, "CRUFT_FONT=/nonexistent/v.font\n"
+		        "CRUFT_FONT=%s\n", garb);
+		fclose(cf);
+		unsetenv("CRUFT_FONT");
+		conf_load_file(tp);
+		expect(getenv("CRUFT_FONT") == NULL,
+			"V unusable file font never installed");
+
 		cf = fopen(tp, "w");
+		expect(cf != NULL, "V temp path rewritable (junk)");
+		if (cf == NULL)
+			goto v_cleanup;
 		fputs("\n   # only junk below\n"
 		      "CRUFT_HISTORY=abc\n"
-		      "CRUFT_SB=bad value\n"
+		      "CRUFT_SB=bad;value\n"
 		      "CRUFT_SB_12H=2\n"
 		      "CRUFT_SB=\n"
 		      "NOT_A_KEY=1\n"
@@ -2134,6 +2188,8 @@ int main(void)
 			pad[sizeof pad - 1] = '\0';
 			cf = fopen(tp, "w");
 			expect(cf != NULL, "V temp path rewritable");
+			if (cf == NULL)
+				goto v_cleanup;
 			fprintf(cf, "%sCRUFT_SB_12H=1\nCRUFT_SB_RAM=256\n", pad);
 			fclose(cf);
 			for (int i = 0; i < 6; i++)
@@ -2144,7 +2200,10 @@ int main(void)
 			expect(strcmp(getenv("CRUFT_SB_RAM"), "256") == 0,
 				"V line after an overlong one still parses");
 		}
+	v_cleanup:
 		unlink(tp);
+		unlink(fntp);
+		unlink(garb);
 
 		for (int i = 0; i < 6; i++) {
 			if (saved[i] != NULL)

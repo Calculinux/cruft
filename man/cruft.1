@@ -37,6 +37,43 @@ session file when the requested depth exceeds the RAM tier (
 While any history is stored, a thin scrollbar in the right edge of the
 grid shows the current position; full-screen programs run on the
 alternate screen and never pollute the history.
+.PP
+Images are shown through two protocols that both land on the same
+sparse per-cell pixmaps, so scrolling, erasing and alt-screen behaviour
+is identical whichever one a client picked:
+.BR sixel
+(device control sequence 62 t) and the
+.B kitty graphics protocol
+(APC \fIESC _ G\fP; the real kitty wire protocol as specified by
+kovidgoyal/kitty, which ratatui-image speaks). Legacy iTerm2
+.B OSC 1337
+input is consumed and ignored without a reply. Decoded images are capped
+at 512x512 pixels, anchored at the cursor, shrunk (aspect-preserving) to
+fit the remaining grid, and never scroll the screen.
+.PP
+The kitty graphics path speaks the full transfer surface: chunked
+uploads (\fIm=\fP), the image store with virtual placement (\fIU=1\fP),
+re-placement (\fIa=p\fP), deletion (\fIa=d\fP), queries, and the
+\fIi=31\fP capability probe. Display uses the protocol's Unicode
+placeholder mechanism: the renderer prints U+10EEEE cells carrying the
+image id in a truecolor foreground, and cruft paints the stored image
+when the placeholder anchor arrives. Capability probes let the client
+side detect all of this instead of falling back to text art: DA1
+advertises the sixel bit (\fIESC [ ?62;4;6c\fP), \fICSI 16t\fP
+reports the cell pixel size (height first), and DSR/CPR are answered.
+Truecolor SGR colours render as the nearest palette colour, so an
+existing cell keeps its colour when a later SGR changes the active one;
+the exact value is kept only for the life of the colour, so image ids
+riding a truecolor SGR decode unquantized.
+zlib-compressed and shared-memory kitty payloads are declined politely.
+.PP
+Raw pixel transfers are always accepted; PNG (\fIf=100\fP) transfers
+additionally need the binary built against the system libpng (detected
+automatically; force the decision with
+.B HAVE_PNG=0
+or
+.BR HAVE_PNG=1 ).
+.PP
 .SH KEYBOARD
 .PP
 History navigation:

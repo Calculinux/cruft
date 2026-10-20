@@ -239,6 +239,12 @@ void addch(struct terminal_t *term, uint32_t code)
 
 	logging(DEBUG, "addch: U+%.4X\n", code);
 
+	/* kitty graphics: placeholder cells (U+10EEEE) and the diacritics
+	 * riding on them are consumed by the graphics path, not the glyph
+	 * path (zero-width marks would be dropped below anyway). */
+	if (kitty_ph_feed(term, code))
+		return;
+
 	width = wcwidth(code);
 
 	if (width <= 0)                                /* zero width: not support combining characters */
@@ -267,8 +273,9 @@ void reset_esc(struct terminal_t *term)
 {
 	logging(DEBUG, "*esc reset*\n");
 
-	term->esc.bp    = term->esc.buf;
-	term->esc.state = STATE_RESET;
+	term->esc.bp       = term->esc.buf;
+	term->esc.state    = STATE_RESET;
+	term->esc.dcs_kind = 0;
 }
 
 bool push_esc(struct terminal_t *term, uint8_t ch)
@@ -291,6 +298,10 @@ bool push_esc(struct terminal_t *term, uint8_t ch)
 				 ' '  '/'  '0'  '~'
 			0x1B 0x20-0x2F 0x30-0x7E
 		*/
+		if (ch == '_') { /* possible kitty APC graphics: await 'G' */
+			term->esc.state = STATE_KPND;
+			return false;
+		}
 		if ('0' <= ch && ch <= '~')        /* final char */
 			return true;
 		else if (SPACE <= ch && ch <= '/') /* intermediate char */
@@ -365,9 +376,11 @@ void reset(struct terminal_t *term)
 	/* RIS is a hard reset of everything the user sees, title included. */
 	term->win_title[0] = '\0';
 	statusbar_invalidate();
-
 	reset_esc(term);
 	reset_charset(term);
+
+	/* kitty graphics state dies with the screen it was aimed at */
+	kitty_grab_reset(term);
 }
 
 void redraw(struct terminal_t *term)
@@ -408,7 +421,10 @@ void enter_alt_screen(struct terminal_t *term)
 	term->active = 1;
 	screen_clear(term);
 	sixel_canvas_free(term); /* the canvas must not straddle the switch */
-}
+	/* graphics: the app's frame hides every placement, and a transfer
+	 * in flight cannot survive the switch */
+	kitty_ph_invalidate(term);
+	kitty_xfer_abort(term);}
 
 void leave_alt_screen(struct terminal_t *term)
 {
@@ -421,7 +437,8 @@ void leave_alt_screen(struct terminal_t *term)
 	prim->cursor = term->alt_saved.cursor;
 	prim->scroll = term->alt_saved.scroll;
 	sixel_canvas_free(term);
-	/* Repaint the restored primary over the app's frame: the FB pixels
+	kitty_ph_invalidate(term);
+	kitty_xfer_abort(term);	/* Repaint the restored primary over the app's frame: the FB pixels
 	 * still show the alt screen, so every primary line goes dirty. */
 	redraw(term);
 }
@@ -438,6 +455,7 @@ void term_die(struct terminal_t *term)
 	sb_die(term);
 	drcs_clear_all(term);
 	sixel_canvas_free(term);
+	kitty_grab_free(term);
 
 	free(term->esc.buf);
 	term->esc.buf = NULL;
@@ -470,7 +488,6 @@ bool term_init(struct terminal_t *term, int width, int height)
 	term->sb.disk.fd = -1; /* zeroed-struct guard (cf. sb_init): the
 			       * OOM die path below must never close()
 			       * what reads as stdin */
-
 	/* allocate memory (primary screen only) */
 	term->esc.buf      = (char *) ecalloc(1, term->esc.size);
 	term->sixel.pixmap = NULL; /* lazy: sixel_canvas_ensure on first sixel */

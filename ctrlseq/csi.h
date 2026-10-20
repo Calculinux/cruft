@@ -122,6 +122,9 @@ void erase_display(struct terminal_t *term, struct parm_t *parm)
 
 	mode = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]);
 
+	/* a wiped screen also kills any image placement laid over it */
+	kitty_ph_invalidate(term);
+
 	if (mode < 0 || 2 < mode)
 		return;
 
@@ -330,6 +333,8 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 		term->attribute     = ATTR_RESET;
 		term->color_pair.fg = DEFAULT_FG;
 		term->color_pair.bg = DEFAULT_BG;
+		term->tc_fg_on      = false;
+		term->tc_bg_on      = false;
 		return;
 	}
 
@@ -341,43 +346,83 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 			term->attribute = ATTR_RESET;
 			term->color_pair.fg = DEFAULT_FG;
 			term->color_pair.bg = DEFAULT_BG;
+			term->tc_fg_on = term->tc_bg_on = false;
 		} else if (1 <= num && num <= 7) {     /* set attribute */
 			term->attribute |= attr_mask[num];
+		} else if (num == 22) {
+			/* Neither bold nor faint. Modern emitters (crossterm
+			 * ResetBold, ratatui style resets) lift bold with 22;
+			 * this product historically only took the VT340-style
+			 * 21 form, so bold leaked until SGR 0 or 39. */
+			term->attribute &= ~(attr_mask[ATTR_BOLD] | attr_mask[2]);
 		} else if (21 <= num && num <= 27) {   /* reset attribute */
 			term->attribute &= ~attr_mask[num - 20];
 		} else if (30 <= num && num <= 37) {   /* set foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = (num - 30);
 		} else if (num == 38) {                /* special foreground color selection */
 			/* select foreground color from 256 color index */
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
+				term->tc_fg_on = false;
 				term->color_pair.fg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select foreground color from specified rgb color */
+			/* select foreground color from specified rgb color. The cell
+			 * stores the stable quantized index (rgb2index), so a later
+			 * SGR can never recolor an existing cell; the exact value
+			 * parks in tc_fg (see set_attr notes in cruft.h) only so the
+			 * kitty placeholder id encoding - which is a truecolor SGR -
+			 * can be read back unquantized. */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
-				term->color_pair.fg = rgb2index(dec2num(parm->argv[i + 2]),
-					dec2num(parm->argv[i + 3]), dec2num(parm->argv[i + 4]));
+				int fr = dec2num(parm->argv[i + 2]);
+				int fg = dec2num(parm->argv[i + 3]);
+				int fb = dec2num(parm->argv[i + 4]);
+
+				term->tc_fg_rgb = ((((uint32_t) fr & 0xFF) << 16)
+						     | (((uint32_t) fg & 0xFF) << 8)
+						     | ((uint32_t) fb & 0xFF));
+				term->tc_fg_on    = true;
+				term->color_pair.fg = rgb2index((uint8_t) fr,
+								  (uint8_t) fg,
+								  (uint8_t) fb);
 				i += 4;
 			}
 		} else if (num == 39) {                /* reset foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = DEFAULT_FG;
 		} else if (40 <= num && num <= 47) {   /* set background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = (num - 40);
 		} else if (num == 48) {                /* special background  color selection */
 			/* select background color from 256 color index */
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
+				term->tc_bg_on = false;
 				term->color_pair.bg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select background color from specified rgb color */
+			/* select background color from specified rgb color (live value
+			 * kept for blends and id decoding, see the 38;2 case
+			 * above) */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
-				term->color_pair.bg = rgb2index(dec2num(parm->argv[i + 2]),
-					dec2num(parm->argv[i + 3]), dec2num(parm->argv[i + 4]));
+				int br = dec2num(parm->argv[i + 2]);
+				int bgc = dec2num(parm->argv[i + 3]);
+				int bb = dec2num(parm->argv[i + 4]);
+
+				term->tc_bg_rgb = ((((uint32_t) br & 0xFF) << 16)
+						     | (((uint32_t) bgc & 0xFF) << 8)
+						     | ((uint32_t) bb & 0xFF));
+				term->tc_bg_on    = true;
+				term->color_pair.bg = rgb2index((uint8_t) br,
+								 (uint8_t) bgc,
+								 (uint8_t) bb);
 				i += 4;
 			}
 		} else if (num == 49) {                /* reset background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = DEFAULT_BG;
 		} else if (90 <= num && num <= 97) {   /* set bright foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = (num - 90) + BRIGHT_INC;
 		} else if (100 <= num && num <= 107) { /* set bright background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = (num - 100) + BRIGHT_INC;
 		}
 	}
@@ -405,9 +450,32 @@ void status_report(struct terminal_t *term, struct parm_t *parm)
 
 void device_attribute(struct terminal_t *term, struct parm_t *parm)
 {
-	/* TODO: refer VT525 DA */
+	/* DA1: VT220-class, sixel-capable (attribute 4 as read by
+	 * ratatui-image's capability probe, 6 the traditional sixel bit;
+	 * clients use it to auto-select a real image protocol) */
 	(void) parm;
-	ewrite(term->fd, "\033[?6c", 5); /* "I am a VT102" */
+	ewrite(term->fd, "\033[?62;4;6c", 10);
+}
+
+/* CSI Ps t: window operations - report only. Sizes in pixels, height
+ * first (xterm-style); capability probes (ratatui-image, kitty clients)
+ * rely on these to scale images into the cell grid. */
+void window_report(struct terminal_t *term, struct parm_t *parm)
+{
+	int i, num;
+	char buf[BUFSIZE];
+
+	for (i = 0; i < parm->argc; i++) {
+		num = dec2num(parm->argv[i]);
+		if (num == 14) { /* text area size */
+			snprintf(buf, BUFSIZE, "\033[4;%d;%dt",
+				term->lines * CELL_HEIGHT, term->width);
+			ewrite(term->fd, buf, strlen(buf));
+		} else if (num == 16) { /* single cell size */
+			snprintf(buf, BUFSIZE, "\033[16;%d;%dt", CELL_HEIGHT, CELL_WIDTH);
+			ewrite(term->fd, buf, strlen(buf));
+		}
+	}
 }
 
 void set_mode(struct terminal_t *term, struct parm_t *parm)

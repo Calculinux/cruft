@@ -148,6 +148,78 @@ wifi stair + battery right. `term_init` shrinks the grid by
   path is untouched. FB type shapes live in `fb/fb.h` (definitions-free,
   so `status.c` can see them without dragging in the one-TU fb backend).
 
+## Image protocols (sixel / kitty)
+
+Two image paths land on the same sparse per-cell pixmaps, so scroll/erase/
+alt-screen/VT-deactivate behave identically for all of them:
+
+- Sixel (DCS 62 t): long-standing path, unchanged (`sixel_canvas.c`,
+  `terminal_cell.c`).
+- **Kitty graphics protocol (APC `_G`)** — `kitty_image.c`. The real kitty
+  wire protocol (kovidgoyal/kitty graphics-protocol spec); ratatui-image
+  speaks this, and the capability probes let its picker upgrade to Kitty
+  instead of falling back to halfblocks:
+  - The envelope is `ESC _ G <par>;<b64> ESC \` (APC — the only form the
+    shipped spec defines, and what ratatui emits; `ESC +` is the ECMA-35 G3
+    designator prefix, not a graphics intro, and stays a plain intermediate).
+    `ESC _` parks the parser in `STATE_KPND`; only the `G`
+    introducer promotes it, and `esc_t.dcs_kind` steers `dcs_sequence()` so
+    `ESC P` stays on the sixel path.
+  - Parameters per spec: `i/I/s/v/f/m/c/r/q/a/U/t/o/d`. Chunked transfers
+    (`m=1` ... `m=0`) assemble in a growing raw buffer; the completion chunk
+    carries none of the header's parameters, so the header's are kept in the
+    transfer state and steer the outcome (store vs paint, the id-ed reply,
+    `q=` suppression).
+  - Formats: f=24/32/34 (RGB/A, red-first), f=33/35 (BGR/A, blue-first),
+    f=100 PNG. `U=1` stores the fitted image in a small slot table keyed by
+    image id; `a=p` re-places it at the cursor, `a=d` deletes it, replies are
+    `ESC _ G i=<id>;OK ESC \`-shaped and honour `q=`. Direct placement (a=T
+    without U) paints at the cursor with the spec epilogue: cursor right of
+    the placed columns, down the placed lines, clamped to the grid (never
+    scrolls).
+  - Display: the renderer prints U+10EEEE placeholder cells carrying the id in
+    a truecolor SGR foreground (low 24 bits as rgb, the high byte riding on a
+    third diacritic); every row head wears its (row, col) diacritics, the rest
+    inherit. `kitty_ph_feed()` (addch front door) swallows those cells —
+    combining marks would otherwise be dropped as zero-width — advances the
+    cursor as a width-1 glyph, resolves the anchor (nd>=2 at row 0, col 0)
+    into the stored image, fits it into the cell box and paints with cursor
+    save/restore; newlines count the region's rows until the placement is
+    complete.
+  - Capability replies: DA1 gains the sixel bit (`ESC [?62;4;6c`), `CSI 16t`
+    reports the cell pixel size (`ESC [16;<h>;<w>t`, height first, matching
+    ratatui's matcher), `i=31` gets the byte-exact `ESC _ G i=31;OK ESC \`,
+    DSR/CPR were already answered.
+  - Documented deviations: truecolor SGR 38;2/48;2 renders cells in the
+    nearest palette colour (stable across later SGRs) and keeps the exact RGB
+    in live terminal state only, so ids survive unquantized;
+    zlib/SHM/file payloads are declined politely; no file/t= transport.
+- **iTerm2 graphics (OSC 1337) — deliberately unsupported.** An early `File ;`
+  / `Image ;` decoder lived here alongside the DCS path, but its raw-BGR +
+  `t=` flavour was a product-invented dialect with no external emitter to
+  validate it against (ratatui-image's iTerm2 backend sends PNG, real iTerm2
+  is never a peer on this bare-metal deployment), and it carried no pixel-level
+  test grounding. The decoder was removed rather than shipped unverified;
+  OSC 1337 input is now consumed and ignored like any unhandled OSC.
+
+Shared placement for all image paths:
+- Budgets: decoded images are capped at `KITTY_MAX_PIXELS` (512x512); an
+  over-capacity kitty transfer poisons its transfer state and dies with an error
+  reply, screen untouched.
+- Anchors at the cursor and fits (nearest-neighbour, aspect preserved by
+  default) into the region to the grid edges; it never scrolls. The kitty path
+  uses the spec's right/down epilogue.
+- Alpha composites over the current background colour when the payload has one
+  (the DCS fourth channel); cells have no alpha channel of their own, unfilled
+  sub-cell fringe stays black (parity with sixel).
+
+PNG is optional (system libpng, high-level `png_image` API only). The makefile
+prefers an explicit `HAVE_PNG=1/0`, then `PNG_CFLAGS`/`PNG_LIBS` hints (the
+cross recipe forwards pkg-config output), otherwise it probes the toolchain for
+the `png_image` entry points. Without libpng the binary builds and runs, and
+PNG payloads (DCS f=100) are dropped with a note; raw pixel transfers are
+unaffected.
+
 ## Build / test
 
 ```bash
@@ -156,3 +228,6 @@ make clean && make && make test
 
 `CRUFT_FONT` selects the font blob.
 `TERM` is `cruft-256color`.
+
+`make HAVE_PNG=0 all` builds the no-libpng variant (PNG path dropped at build
+time); `make check` runs lint/tidy/cppcheck/shellcheck/test.

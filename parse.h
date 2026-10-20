@@ -50,6 +50,7 @@ void (*csi_func[ESC_CHARS])(struct terminal_t *term, struct parm_t *) = {
 	['m'] = set_attr,
 	['n'] = status_report,
 	['r'] = set_margin,
+	['t'] = window_report,
 	/* XXX: not implemented because these sequences conflict DECSLRM/DECSHTS
 	['s'] = sco_save_state,
 	['u'] = sco_restore_state,
@@ -150,6 +151,10 @@ void osc_sequence(struct terminal_t *term, uint8_t ch)
 		title_raw[n] = '\0';
 	}
 
+	/* OSC 1337 (iTerm2-style inline images) is deliberately unsupported:
+	 * its former decoder lived in kitty_image.c until it was removed for
+	 * wanting external grounding. Such input now falls through to the
+	 * generic OSC path below and is consumed and ignored. */
 	reset_parm(&parm);
 	parse_arg(term->esc.buf + 1, &parm, ';', is_osc_parm); /* skip ']' */
 
@@ -182,6 +187,16 @@ void dcs_sequence(struct terminal_t *term, uint8_t ch)
 	omit_string_terminator(term->esc.bp, ch);
 
 	logging(DEBUG, "dcs: DCS %s\n", term->esc.buf);
+
+	/* kitty graphics travels in the APC intro (ESC _ G) - the only
+	 * envelope the shipped spec defines (ESC + is the ECMA-35 G3
+	 * designator prefix and must stay a plain intermediate); the
+	 * ESC P body below is the traditional DCS one (sixel, DECDLD) */
+	if (term->esc.dcs_kind == '_') {
+		kitty_dcs_dispatch(term, term->esc.buf + 2);
+		reset_esc(term);
+		return;
+	}
 
 	/* check DCS header */
 	cp = term->esc.buf + 1; /* skip P */
@@ -229,26 +244,35 @@ void utf8_charset(struct terminal_t *term, uint8_t ch)
 		term->charset.code += ch & 0x3F;
 		term->charset.count++;
 	} else if (0xC0 <= ch && ch <= 0xDF) {
+		/* a new sequence starts valid; the continuation checks above
+		 * may still downgrade it. Also keeps a zero-initialised
+		 * charset (is_valid == false) from eating the first
+		 * multi-byte character after boot. */
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x1F;
 		term->charset.following_byte = 1;
 		term->charset.count = 0;
 		return;
 	} else if (0xE0 <= ch && ch <= 0xEF) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x0F;
 		term->charset.following_byte = 2;
 		term->charset.count = 0;
 		return;
 	} else if (0xF0 <= ch && ch <= 0xF7) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x07;
 		term->charset.following_byte = 3;
 		term->charset.count = 0;
 		return;
 	} else if (0xF8 <= ch && ch <= 0xFB) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x03;
 		term->charset.following_byte = 4;
 		term->charset.count = 0;
 		return;
 	} else if (0xFC <= ch && ch <= 0xFD) {
+		term->charset.is_valid = true;
 		term->charset.code = ch & 0x01;
 		term->charset.following_byte = 5;
 		term->charset.count = 0;
@@ -279,6 +303,50 @@ void utf8_charset(struct terminal_t *term, uint8_t ch)
 	}
 }
 
+/* One input byte through the state machine. Factored out of parse() so
+ * that a rejected pending state can re-dispatch its byte as plain input. */
+static void parse_step(struct terminal_t *term, uint8_t ch)
+{
+	if (term->esc.state == STATE_RESET) {
+		/* interrupted by illegal byte */
+		if (term->charset.following_byte > 0 && (ch < 0x80 || ch > 0xBF)) {
+			addch(term, REPLACEMENT_CHAR);
+			reset_charset(term);
+		}
+
+		if (ch <= 0x1F)
+			control_character(term, ch);
+		else if (ch <= 0x7F)
+			addch(term, ch);
+		else
+			utf8_charset(term, ch);
+	} else if (term->esc.state == STATE_ESC) {
+		if (push_esc(term, ch))
+			esc_sequence(term, ch);
+	} else if (term->esc.state == STATE_KPND) {
+		/* after "ESC _": G starts the kitty APC graphics body; anything
+		 * else is a foreign SEP - drop the pending state and process
+		 * the byte as plain input */
+		if (ch == 'G') {
+			push_esc(term, ch);
+			term->esc.dcs_kind = '_';
+			term->esc.state    = STATE_DCS;
+		} else {
+			reset_esc(term);
+			parse_step(term, ch);
+		}
+	} else if (term->esc.state == STATE_CSI) {
+		if (push_esc(term, ch))
+			csi_sequence(term, ch);
+	} else if (term->esc.state == STATE_OSC) {
+		if (push_esc(term, ch))
+			osc_sequence(term, ch);
+	} else if (term->esc.state == STATE_DCS) {
+		if (push_esc(term, ch))
+			dcs_sequence(term, ch);
+	}
+}
+
 void parse(struct terminal_t *term, uint8_t *buf, int size)
 {
 	/*
@@ -287,35 +355,7 @@ void parse(struct terminal_t *term, uint8_t *buf, int size)
 		CTRL CHARS(DEL) : 0x7F
 		UTF-8           : 0x80 ~ 0xFF
 	*/
-	uint8_t ch;
 
-	for (int i = 0; i < size; i++) {
-		ch = buf[i];
-		if (term->esc.state == STATE_RESET) {
-			/* interrupted by illegal byte */
-			if (term->charset.following_byte > 0 && (ch < 0x80 || ch > 0xBF)) {
-				addch(term, REPLACEMENT_CHAR);
-				reset_charset(term);
-			}
-
-			if (ch <= 0x1F)
-				control_character(term, ch);
-			else if (ch <= 0x7F)
-				addch(term, ch);
-			else
-				utf8_charset(term, ch);
-		} else if (term->esc.state == STATE_ESC) {
-			if (push_esc(term, ch))
-				esc_sequence(term, ch);
-		} else if (term->esc.state == STATE_CSI) {
-			if (push_esc(term, ch))
-				csi_sequence(term, ch);
-		} else if (term->esc.state == STATE_OSC) {
-			if (push_esc(term, ch))
-				osc_sequence(term, ch);
-		} else if (term->esc.state == STATE_DCS) {
-			if (push_esc(term, ch))
-				dcs_sequence(term, ch);
-		}
-	}
+	for (int i = 0; i < size; i++)
+		parse_step(term, buf[i]);
 }

@@ -6,10 +6,10 @@ LDFLAGS ?=
 ASAN_CFLAGS = $(WARNFLAGS) -O1 -g -fsanitize=address -fno-omit-frame-pointer
 ASAN_LDFLAGS = -fsanitize=address
 
-SRCS = cruft.c glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
+SRCS = cruft.c glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
 # Standalone translation units tidy/cppcheck can analyze without fb/VT headers
 # (status.c includes the fb type shapes, so it stays out of LINT_SRCS).
-LINT_SRCS = glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c terminal_cell.c scrollback.c sbdisk.c conf.c tools/mkcruftfont.c
+LINT_SRCS = glyph_mmap.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c terminal_cell.c scrollback.c sbdisk.c conf.c tools/mkcruftfont.c
 HDR = glyph.h cruft.h conf.h color.h parse.h terminal.h util.h status.h \
 	ctrlseq/esc.h ctrlseq/csi.h ctrlseq/osc.h ctrlseq/dcs.h \
 	fb/common.h fb/linux.h fb/fb.h
@@ -18,47 +18,127 @@ DESTDIR   =
 PREFIX    = $(DESTDIR)/usr
 MANPREFIX = $(DESTDIR)/usr/share/man
 
-TEST_SRCS = tests/selftest.c cell_pixmap.c drcs.c sixel_canvas.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
+TEST_SRCS = tests/selftest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
+# Same engine TUs as TEST_SRCS with the golden-pixel driver instead of
+# selftest.c. Flat on purpose: the Yocto recipe extracts the TEST_SRCS
+# line verbatim, so keep both lists spelled out.
+GOLDEN_SRCS = tests/golden_main.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
 TEST_CFLAGS = $(WARNFLAGS) -O0 -g -I.
+
+# Optional system libpng: PNG payloads on the kitty graphics path (File;).
+# Precedence: explicit HAVE_PNG=1/0 beats all; then a PNG_CFLAGS/PNG_LIBS
+# hint (cross builds: the OE recipe forwards pkg-config output); otherwise
+# probe the toolchain. Builds without it compile and run, dropping PNG
+# payloads with a note (raw BGR/BGRA and the Image/Rep path are unaffected).
+ifeq ($(HAVE_PNG),)
+ifneq ($(strip $(PNG_CFLAGS) $(PNG_LIBS)),)
+HAVE_PNG := 1
+else
+# Probe the high-level png_image API specifically (libpng >= 1.6): the code
+# only uses those entry points, so a libpng lacking them must be rejected.
+# The probe instantiates the png_image type (a typedef of an anonymous
+# struct, NOT "struct png_image") so broken/reduced headers fail here.
+HAVE_PNG := $(shell printf '%s\n' \
+	'#include <png.h>' \
+	'int main(void){' \
+	'png_image pi;' \
+	'pi.version = PNG_IMAGE_VERSION;' \
+	'(void) pi;' \
+	'return (png_image_begin_read_from_memory != 0)' \
+	'    + (png_image_finish_read != 0)' \
+	'    + (png_image_free != 0);' \
+	'}' | \
+	$(CC) -x c - -std=c99 -lpng -o /dev/null 2>/dev/null && echo 1)
+endif
+endif
+ifeq ($(HAVE_PNG),1)
+KG_PNG_CFLAGS = -DHAVE_LIBPNG $(PNG_CFLAGS)
+KG_PNG_LDFLAGS = $(or $(PNG_LIBS),-lpng)
+CFLAGS += $(KG_PNG_CFLAGS)
+TEST_CFLAGS += $(KG_PNG_CFLAGS)
+endif
 
 CLANG_TIDY ?= clang-tidy
 CPPCHECK ?= cppcheck
 SHELLCHECK ?= shellcheck
 
-.PHONY: all clean install uninstall test test-asan lint tidy cppcheck shellcheck check
+.PHONY: all clean install uninstall test test-asan golden lint tidy cppcheck shellcheck check apptest-live apptest-asset
 
 all: cruft mkcruftfont
 
 cruft: $(SRCS) $(HDR)
 	# Glyphs: mmap .cruftfont blob (glyph_mmap.c); runtime cell metrics from blob header.
-	$(CC) -o $@ $(SRCS) $(CFLAGS) $(LDFLAGS)
+	$(CC) -o $@ $(SRCS) $(CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
 
 mkcruftfont: tools/mkcruftfont.c
 	$(CC) -o $@ $< $(CFLAGS) $(LDFLAGS)
 
-test: cruft mkcruftfont tests/selftest
+test: cruft mkcruftfont tests/selftest tests/golden
 	./tests/selftest
+	./tests/golden
 	./mkcruftfont --self-check
 
 tests/selftest: $(TEST_SRCS) $(HDR)
-	$(CC) -o $@ $(TEST_SRCS) $(TEST_CFLAGS) $(LDFLAGS)
+	$(CC) -o $@ $(TEST_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
+
+# L2 golden-pixel gate: real parse()/refresh() into a fabricated
+# 320x320 frame, whole-frame compare against tests/goldens/.
+# UPDATE_GOLDENS=1 make golden rewrites the references (requires
+# review before committing).
+golden: tests/golden
+	./tests/golden
+
+tests/golden: $(GOLDEN_SRCS) $(HDR)
+	$(CC) -o $@ $(GOLDEN_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
+
+# L2b live driver: the real ratatui-image app (pinned rev; the asset
+# is built with cargo and NOT committed) runs on a real pty against
+# the in-process product; writetee.so mirrors the app's stdout
+# writes at the write boundary (the pty line discipline is
+# empirically lossy in transit - see REPORT.md) and freezes/verifies
+# the kitty-applive golden trio (trace/reply/frame) that tests/golden
+# replays dependency-free.
+# Optional: `make test` never depends on this. To refreeze the trio:
+#   ./tests/apptest --update <asset-bin> <png>
+APPT_SRCS = tests/apptest.c cell_pixmap.c drcs.c sixel_canvas.c kitty_image.c glyph_mmap.c terminal_cell.c scrollback.c sbdisk.c status.c conf.c
+
+tests/apptest: $(APPT_SRCS) $(HDR)
+	$(CC) -o $@ $(APPT_SRCS) $(TEST_CFLAGS) $(LDFLAGS) $(KG_PNG_LDFLAGS)
+
+# LD_PRELOAD shim for the live driver's app child: mirrors every
+# write() to the app's stdout onto the capture pipe (write boundary
+# = before the kernel touches the bytes).
+tests/l2b/writetee.so: tests/l2b/writetee.c
+	# no -pedantic: the dlsym object->function-pointer casts the
+	# shim needs are ISO-UB and pedantic rejects them
+	$(CC) -shared -fPIC -O2 -std=c99 -Wall -Wextra -Werror -o $@ $<
+
+apptest-asset:
+	cargo build --release --manifest-path tests/l2b/asset/Cargo.toml
+
+apptest-live: tests/apptest tests/l2b/writetee.so apptest-asset
+	./tests/apptest tests/l2b/asset/target/release/apptest-asset \
+		tests/l2b/asset/img/apptest-100x60.png
 
 test-asan: $(SRCS) $(HDR) tests/selftest.c
-	$(CC) -o tests/selftest-asan $(TEST_SRCS) $(ASAN_CFLAGS) -I. $(ASAN_LDFLAGS)
+	$(CC) -o tests/selftest-asan $(TEST_SRCS) $(ASAN_CFLAGS) $(KG_PNG_CFLAGS) -I. $(ASAN_LDFLAGS) $(KG_PNG_LDFLAGS)
 	./tests/selftest-asan
 
 # Compiler-as-linter: catch warnings as errors without linking.
 lint:
-	$(CC) -fsyntax-only $(WARNFLAGS) -O2 -I. $(SRCS)
+	$(CC) -fsyntax-only $(WARNFLAGS) -O2 -I. $(KG_PNG_CFLAGS) $(SRCS)
 	$(CC) -fsyntax-only $(WARNFLAGS) -O2 tools/mkcruftfont.c
-	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(TEST_SRCS)
+	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(TEST_SRCS)
+	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(GOLDEN_SRCS)
+	$(CC) -fsyntax-only $(WARNFLAGS) -O0 -g -I. $(KG_PNG_CFLAGS) $(APPT_SRCS)
+	$(CC) -fsyntax-only -std=c99 -Wall -Wextra -Werror -O2 tests/l2b/writetee.c
 
 tidy:
-	$(CLANG_TIDY) $(LINT_SRCS) -- $(WARNFLAGS) -O2 -I.
+	$(CLANG_TIDY) $(LINT_SRCS) -- $(WARNFLAGS) -O2 -I. $(KG_PNG_CFLAGS)
 
 cppcheck:
 	$(CPPCHECK) --error-exitcode=1 --std=c99 --enable=warning,style,performance \
-		--suppress=missingIncludeSystem --inline-suppr -I. $(LINT_SRCS)
+		--suppress=missingIncludeSystem --inline-suppr -I. $(KG_PNG_CFLAGS) $(LINT_SRCS)
 
 shellcheck:
 	$(SHELLCHECK) -x cruft_wall
@@ -84,4 +164,4 @@ uninstall:
 	rm -f $(MANPREFIX)/man1/cruft.1
 
 clean:
-	rm -f cruft mkcruftfont tests/selftest tests/selftest-asan
+	rm -f cruft mkcruftfont tests/selftest tests/selftest-asan tests/golden tests/apptest tests/l2b/writetee.so

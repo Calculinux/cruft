@@ -471,6 +471,57 @@ static long w_drain(int fd, char *got, size_t cap)
 	return off;
 }
 
+
+#ifdef HAVE_LIBPNG
+/* Solid-colour PNGs (base64): 4x4 red; 600x600 green, i.e. past the 512x512
+ * raw budget (PNG sources are shrunk to the grid, so only the transient
+ * decode buffer is bounded). */
+static const char w_png_red[] =
+	"iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR42mP8z4AA"
+	"TAxEcQAz0QEH0oWRNwAAAABJRU5ErkJggg==";
+static const char w_png_big_green[] =
+	"iVBORw0KGgoAAAANSUhEUgAAAlgAAAJYCAIAAAAxBA+LAAAHI0lEQVR42u3VMQEA"
+	"AAjDsIF/z+CCh0RCn1YmAPBWSwCAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKA"
+	"EQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKA"
+	"EQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKA"
+	"EQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQKAEQJghABghABghABghABghABghABg"
+	"hABghABghABghABghABghABghABghABghABghABghABghABghABghABghABghABg"
+	"hABghABghABghABghABghABghABghABghABghABghABghABghABghABghABghABg"
+	"hABghABghABghABghABghABghABghABghABghABghABghABghABghAAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAY"
+	"IQBGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABG"
+	"CABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABG"
+	"CABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABG"
+	"CABGCABGCABGCABGCIARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoAR"
+	"AoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoAR"
+	"AoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoAR"
+	"AoARAoARAoARAoARAoARAoARAoARAmCEEgBghABghABghABghABghABghABghABg"
+	"hABghABghABghABghABghABghABghABghABghABghABghABghABghABghABghABg"
+	"hABghABghABghABghABghABghABghABghABghABghABghABghABghABghABghABg"
+	"hABghABghABghABghABghABghABghABghABghABghABghAAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQBG"
+	"CABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABG"
+	"CABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABG"
+	"CABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABG"
+	"CABGCABGCIARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoAR"
+	"AoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoAR"
+	"AoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoARAoAR"
+	"AoARAoARAoARAoARAoARAoARAmCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCE"
+	"AGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCE"
+	"AGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCE"
+	"AGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEAGCEABihBAAYIQAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAY"
+	"IQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQAYIQBGCABGCABG"
+	"CABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABG"
+	"CABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCABGCAAXFoFtBa8T2w12"
+	"AAAAAElFTkSuQmCC";
+#endif
+
 static int u_setup(struct terminal_t *term)
 {
 	if (alloc_term_grid(term, 60, 24) < 0)
@@ -2547,6 +2598,62 @@ int main(void)
 					u_teardown(&term);
 				}
 			}
+
+#ifdef HAVE_LIBPNG
+			/* W11: f=100 PNG - single shot, chunked (header chunk
+			 * carries only f=100, no s=/v=), and a source past the
+			 * raw pixel budget */
+			{
+				int pass;
+
+				for (pass = 0; pass < 3; pass++) {
+					const char *b64 = pass == 2 ? w_png_big_green: w_png_red;
+					size_t blen = strlen(b64), half = (blen / 2) & ~(size_t) 3;
+					char *a, *b;
+					uint8_t *sq;
+
+					expect(u_setup(&term) == 0, "W11 alloc");
+					term.fd = rp[1];
+					term.color_pair.bg = 0;
+					if (pass == 1) {
+						a = (char *) malloc(half + 1);
+						b = (char *) malloc(blen - half + 1);
+						if (a && b) {
+							memcpy(a, b64, half);
+							a[half] = '\0';
+							memcpy(b, b64 + half, blen - half + 1);
+							sq = w_apc("a=T,f=100,i=11,m=1", a);
+							parse(&term, sq, (int) strlen((const char *) sq));
+							free(sq);
+							expect(w_px(&term, 0, 0)->has_pixmap == false,
+								"W11 chunked: nothing painted before m=0");
+							sq = w_apc("m=0", b);
+							parse(&term, sq, (int) strlen((const char *) sq));
+							free(sq);
+						}
+						free(a);
+						free(b);
+					} else {
+						sq = w_apc(pass == 0 ? "a=T,f=100,i=11":
+							   "a=T,f=100,i=11,m=0", b64);
+						parse(&term, sq, (int) strlen((const char *) sq));
+						free(sq);
+					}
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W11 drained");
+					expect(strstr(got, "\033_Gi=11;OK") != NULL, "W11 PNG OK reply");
+					expect(w_px(&term, 0, 0)->has_pixmap, "W11 PNG painted");
+					if (pass != 2)
+						expect(w_px(&term, 0, 0)->pixmap[2] == 0xFF
+							&& w_px(&term, 0, 0)->pixmap[1] == 0x00,
+							"W11 PNG pixel is red");
+					else
+						expect(w_px(&term, 0, 0)->pixmap[1] == 0xFF
+							&& w_px(&term, 0, 0)->pixmap[2] == 0x00,
+							"W11 big PNG pixel is green");
+					u_teardown(&term);
+				}
+			}
+#endif
 			close(rp[1]);
 			rp[1] = -1;
 			close(rp[0]);

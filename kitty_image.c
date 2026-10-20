@@ -47,6 +47,13 @@ void cr(struct terminal_t *term);
  */
 #define KITTY_MAX_PIXELS 262144u
 
+/* PNG sources are decoded at natural size and then shrunk to the grid, so
+ * the budget bounds only the transient RGBA buffer (4 MiB at the limit);
+ * album art is routinely 600x600 or larger. The compressed payload of a
+ * chunked transfer is bounded separately. */
+#define KITTY_MAX_PNG_PIXELS 1048576u
+#define KITTY_MAX_PNG_BYTES  (2u * 1024u * 1024u)
+
 
 static int b64_val(int c)
 {
@@ -255,9 +262,9 @@ static int png_decode(const uint8_t *raw, size_t n, struct terminal_t *term,
 	rw = (int) pi.width;
 	rh = (int) pi.height;
 	if (rw < 1 || rh < 1 ||
-	    (unsigned long long) rw * (unsigned long long) rh > KITTY_MAX_PIXELS) {
+	    (unsigned long long) rw * (unsigned long long) rh > KITTY_MAX_PNG_PIXELS) {
 		fprintf(stderr, "cruft: kitty_image: PNG exceeds %u px budget\n",
-			KITTY_MAX_PIXELS);
+			KITTY_MAX_PNG_PIXELS);
 		png_image_free(&pi);
 		return -1;
 	}
@@ -492,7 +499,7 @@ static int kg_diac_index(unsigned cp)
 
 struct kg_par {
 	long i, I, s, v, f, m, c, r, q;
-	unsigned has_i, has_s, has_v, has_m, has_c, has_r, has_I;
+	unsigned has_i, has_s, has_v, has_m, has_c, has_r, has_I, has_f;
 	unsigned U;
 	int a, t, o, d;
 };
@@ -531,7 +538,7 @@ static void kg_parse_par(const char *p, size_t n, struct kg_par *k)
 		case 'I': k->I = num; k->has_I = 1; break;
 		case 's': k->s = num; k->has_s = 1; break;
 		case 'v': k->v = num; k->has_v = 1; break;
-		case 'f': k->f = num; break;
+		case 'f': k->f = num; k->has_f = 1; break;
 		case 'm': k->m = num; k->has_m = 1; break;
 		case 'c': k->c = num; k->has_c = 1; break;
 		case 'r': k->r = num; k->has_r = 1; break;
@@ -659,19 +666,33 @@ static int kgx_start(struct terminal_t *term, const struct kg_par *k)
 	size_t cap;
 
 	kitty_xfer_abort(term);
-	if (!k->has_s || !k->has_v || k->s < 1 || k->v < 1)
-		return -1;
-	if ((unsigned long long) k->s * (unsigned long long) k->v > KITTY_MAX_PIXELS)
-		return -1;
 	chan = kg_format(k->f, &first_red);
-	if (chan < 0 || chan == 0)
+	if (chan < 0)
 		return -1;
-	cap = (size_t) k->s * (size_t) k->v * (size_t) chan;
-	x->raw = malloc(cap);
-	if (!x->raw)
-		return -1;
-	x->w = (unsigned) k->s;
-	x->h = (unsigned) k->v;
+	if (chan == 0) {
+		/* f=100: the PNG carries its own size (s=/v= are ignored);
+		 * the compressed bytes are collected in a buffer that grows
+		 * with the chunks and decoded once at completion */
+		if (!kitty_png_available())
+			return -1;
+		first_red = 1;
+		cap = 0;
+		x->raw = NULL;
+		x->png = true;
+		x->w = x->h = 0;
+	} else {
+		if (!k->has_s || !k->has_v || k->s < 1 || k->v < 1)
+			return -1;
+		if ((unsigned long long) k->s * (unsigned long long) k->v > KITTY_MAX_PIXELS)
+			return -1;
+		cap = (size_t) k->s * (size_t) k->v * (size_t) chan;
+		x->raw = malloc(cap);
+		if (!x->raw)
+			return -1;
+		x->png = false;
+		x->w = (unsigned) k->s;
+		x->h = (unsigned) k->v;
+	}
 	x->chan = (unsigned) chan;
 	x->first_red = (unsigned) first_red;
 	x->fmt    = (int) k->f;
@@ -702,7 +723,24 @@ static int kgx_append(struct terminal_t *term, const char *b64, size_t b64len)
 	db = kg_dbuf(b64len / 4 * 3 + 4);
 	if (!db || kg_b64(b64, b64len, db, b64len / 4 * 3 + 4, &dl) < 0)
 		goto poison;
-	if (x->len + dl > x->cap)
+	if (x->png) {
+		if (x->len + dl > KITTY_MAX_PNG_BYTES)
+			goto poison;
+		if (x->len + dl > x->cap) {
+			size_t ncap = x->cap ? x->cap * 2: 65536;
+			uint8_t *nr;
+
+			while (ncap < x->len + dl)
+				ncap *= 2;
+			if (ncap > KITTY_MAX_PNG_BYTES)
+				ncap = KITTY_MAX_PNG_BYTES;
+			nr = realloc(x->raw, ncap);
+			if (!nr)
+				goto poison;
+			x->raw = nr;
+			x->cap = ncap;
+		}
+	} else if (x->len + dl > x->cap)
 		goto poison;
 	memcpy(x->raw + x->len, db, dl);
 	x->len += dl;
@@ -715,10 +753,27 @@ poison:
 /* Native-size 0x00RRGGBB image of a finished transfer (NULL on failure). */
 static uint32_t *kgx_build(struct terminal_t *term, uint32_t bg)
 {
-	const struct kitty_xfer *x = &term->kgx;
+	struct kitty_xfer *x = &term->kgx;
 	uint32_t *img;
 
-	if (!x->have || x->bad || x->len < x->cap)
+	if (!x->have || x->bad)
+		return NULL;
+#ifdef HAVE_LIBPNG
+	if (x->png) {
+		int tw = 0, th = 0;
+
+		img = NULL;
+		if (x->len == 0 ||
+		    png_decode(x->raw, x->len, term, 1, bg, &tw, &th, &img) != 0)
+			return NULL;
+		/* png_decode fits the image to the grid: the stored size is
+		 * the fitted one */
+		x->w = (unsigned) tw;
+		x->h = (unsigned) th;
+		return img;
+	}
+#endif
+	if (x->png || x->len < x->cap)
 		return NULL;
 	/* the output is w*h pixels, not the (possibly multi-channel) raw
 	 * byte count - sizing it from x->cap blew the allocation up 3-4x
@@ -958,12 +1013,21 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
 						"ENOSYS:compression unsupported");
 			return;
 		}
-		if (!k.has_s) { /* continuation chunk */
+		/* A chunk without size/format keys continues the open transfer;
+		 * the header chunk carries s=/v= (raw) or f=100 (PNG, which
+		 * has no s=/v=). */
+		if (!k.has_s && !k.has_f) { /* continuation chunk */
 			if (kgx_append(term, payload, plen) < 0 && k.has_i)
 				kg_reply_quiet(term, &k, (unsigned long) k.i, false,
 					      "EBADMSG:bad chunk");
 			if (k.m == 0)
 				kgx_complete(term);
+			return;
+		}
+		if (k.f == 100 && !kitty_png_available()) {
+			if (k.has_i)
+				kg_reply_quiet(term, &k, (unsigned long) k.i, false,
+					       "ENOSYS:png unsupported in this build");
 			return;
 		}
 		if (kgx_start(term, &k) < 0) {

@@ -47,9 +47,11 @@ is identical whichever one a client picked:
 (APC \fIESC _ G\fP; the real kitty wire protocol as specified by
 kovidgoyal/kitty, which ratatui-image speaks). Legacy iTerm2
 .B OSC 1337
-input is consumed and ignored without a reply. Decoded images are capped
-at 512x512 pixels, anchored at the cursor, shrunk (aspect-preserving) to
-fit the remaining grid, and never scroll the screen.
+input is consumed and ignored without a reply. Raw pixel images are capped
+at 512x512 pixels and PNG sources (\fIf=100\fP, single-shot or chunked)
+at 1024x1024 pixels and 2 MiB of compressed data; images are anchored at
+the cursor, shrunk (aspect-preserving) to fit the remaining grid, and
+never scroll the screen.
 .PP
 The kitty graphics path speaks the full transfer surface: chunked
 uploads (\fIm=\fP), the image store with virtual placement (\fIU=1\fP),

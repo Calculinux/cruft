@@ -224,6 +224,7 @@ struct kitty_xfer {
 	uint32_t id;
 	unsigned has_id, U, q, a;
 	unsigned c, r, has_c, has_r;
+	bool png;               /* f=100: raw holds compressed PNG bytes, w/h set at decode */
 	bool have, bad;         /* header seen / transfer poisoned */
 };
 

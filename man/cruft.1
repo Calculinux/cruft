@@ -12,6 +12,10 @@ cruft \- Calculinux reduced footprint framebuffer terminal
 is a Linux framebuffer terminal emulator derived from yaft, tuned for
 low memory on Calculinux devices.
 .PP
+The alternate screen buffer (DECALT) is implemented, so full-screen
+programs (vim, htop, less) run on their own buffer and leave the main
+screen intact when they exit.
+.PP
 When a status font is installed, cruft draws a status bar in the margin
 strip above the cell grid: the window title set by the foreground
 program on the left, the clock in the centre, and a wifi signal stair
@@ -24,6 +28,82 @@ no such coverage), and the title is trimmed so it never overlaps the
 centred clock. A segment whose data source is absent (bare hardware,
 VM) is hidden; a missing or unsuitable status font disables the bar
 entirely and the grid reclaims the full screen.
+.PP
+Lines that scroll off the top of the main screen are kept in a
+scrollback buffer (see
+.BR CRUFT_HISTORY ): the newest rows in RAM, and older ones in a
+session file when the requested depth exceeds the RAM tier (
+.BR CRUFT_SB_RAM ).
+While any history is stored, a thin scrollbar in the right edge of the
+grid shows the current position; full-screen programs run on the
+alternate screen and never pollute the history.
+.PP
+Images are shown through two protocols that both land on the same
+sparse per-cell pixmaps, so scrolling, erasing and alt-screen behaviour
+is identical whichever one a client picked:
+.BR sixel
+(device control sequence 62 t) and the
+.B kitty graphics protocol
+(APC \fIESC _ G\fP; the real kitty wire protocol as specified by
+kovidgoyal/kitty, which ratatui-image speaks). Legacy iTerm2
+.B OSC 1337
+input is consumed and ignored without a reply. Decoded images are capped
+at 512x512 pixels, anchored at the cursor, shrunk (aspect-preserving) to
+fit the remaining grid, and never scroll the screen.
+.PP
+The kitty graphics path speaks the full transfer surface: chunked
+uploads (\fIm=\fP), the image store with virtual placement (\fIU=1\fP),
+re-placement (\fIa=p\fP), deletion (\fIa=d\fP), queries, and the
+\fIi=31\fP capability probe. Display uses the protocol's Unicode
+placeholder mechanism: the renderer prints U+10EEEE cells carrying the
+image id in a truecolor foreground, and cruft paints the stored image
+when the placeholder anchor arrives. Capability probes let the client
+side detect all of this instead of falling back to text art: DA1
+advertises the sixel bit (\fIESC [ ?62;4;6c\fP), \fICSI 16t\fP
+reports the cell pixel size (height first), and DSR/CPR are answered.
+Truecolor SGR colours render as the nearest palette colour, so an
+existing cell keeps its colour when a later SGR changes the active one;
+the exact value is kept only for the life of the colour, so image ids
+riding a truecolor SGR decode unquantized.
+zlib-compressed and shared-memory kitty payloads are declined politely.
+.PP
+Raw pixel transfers are always accepted; PNG (\fIf=100\fP) transfers
+additionally need the binary built against the system libpng (detected
+automatically; force the decision with
+.B HAVE_PNG=0
+or
+.BR HAVE_PNG=1 ).
+.PP
+.SH KEYBOARD
+.PP
+History navigation:
+.RS
+.TP
+\fBPrior\fP (\fBESC [5~\fP)
+half a page deeper into the history
+.TP
+\fBNext\fP (\fBESC [6~\fP)
+half a page towards the live tail
+.TP
+\fBCtrl+Home\fP (\fBESC [1;5H\fP)
+the oldest stored row
+.TP
+\fBCtrl+End\fP (\fBESC [1;5F\fP)
+the live tail
+.RE
+.PP
+The page keys are native: on the PicoCalc the keyboard driver maps
+Shift+Up / Shift+Down to them. The Ctrl+Home / Ctrl+End sequences come
+from the shipped console keymap (picocalc.map); both halves of those
+pairs are free on this keyboard, whose Home / End are themselves the
+shifted Tab / Delete. Bare arrows, and bare Home / End, stay the
+program's. On the main screen cruft intercepts the four sequences
+before the foreground program sees them; full-screen programs run on
+the alternate screen and own every key.
+.PP
+Any other key while browsing scrolls back to the live tail and is
+delivered to the program. Sequences are matched only at the start of a
+keypress, so a split-delivery ESC will occasionally pass through.
 .SH CUSTOMIZATION
 .PP
 Rewrite conf.h before make.
@@ -59,6 +139,27 @@ or
 .BR 0 )
 to disable the bar. Unknown names are ignored with a warning.
 .TP
+.B CRUFT_HISTORY
+Total scrollback depth in rows, across the RAM tier and the disk
+overflow (default 96, capped at 16384).
+0 disables history and the scrollbar. Rows deeper than the RAM tier
+(default 512, see
+.BR CRUFT_SB_RAM )
+spill to a session file in /var/tmp (created 0600, removed on exit);
+a depth at or below the RAM tier keeps history fully in memory.
+Stored rows carry copied cell contents; sixel pixmaps are kept per
+row up to a 32 KiB budget on disk (a row that is almost all art
+degrades to blank text) and in the RAM ring up to a 64 KiB total
+budget, oldest art degrading to blank beyond it. A file that becomes
+unreadable (crash, damage) silently disables the disk tier for the
+session; the RAM tier and the screen keep working.
+.TP
+.B CRUFT_SB_RAM
+Rows of scrollback kept in the RAM tier (default 512, 1 to 16384).
+Only depths above this value in
+.B CRUFT_HISTORY
+are stored on disk.
+.TP
 .B CRUFT_SB_12H
 Set to 1 for a 12-hour clock (\fIH:MMam/pm\fP); the default is
 24-hour.
@@ -67,6 +168,31 @@ Set to 1 for a 12-hour clock (\fIH:MMam/pm\fP); the default is
 Path to the 4x8 CRUFTFN1 status font
 (default /usr/share/cruft/status.cruftfont, installed by the
 miniwi-console package).
+.SH CONFIGURATION
+.PP
+Persistent defaults can be set in
+.B /etc/cruft.conf ,
+one \fIKEY=VALUE\fP per line (\fB#\fP comments, blank lines and
+whitespace around the \fB=\fP are ignored). The recognised keys are the
+six \fICRUFT_*\fP variables above:
+.BR CRUFT_FONT ,
+.BR CRUFT_SB ,
+.BR CRUFT_SB_FONT ,
+.BR CRUFT_SB_12H ,
+.BR CRUFT_HISTORY
+and
+.B CRUFT_SB_RAM .
+.B FRAMEBUFFER
+and
+.B CRUFT
+are environment-only and cannot be set in the file. The built-in
+default applies when neither the file nor the environment sets a key.
+Precedence: environment (per-service \fBEnvironment=\fP, exported shell
+variable) overrides the file, which overrides the built-in. Unknown
+keys and malformed values are skipped with a warning, as is a
+.B CRUFT_FONT
+value the file supplies that is not a loadable font (the built-in font
+stands); a missing or empty file changes nothing.
 .SH AUTHOR
 .PP
 Calculinux fork; upstream yaft by haru <uobikiemukot at gmail dot com>

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -17,7 +18,14 @@
 #include "util.h"
 #include "fb/common.h"
 #include "status.h"
-
+/* Unity headers, mirrored from cruft.c: the W section drives the real
+ * parse() so the kitty DCS path is covered end to end. */
+#include "terminal.h"
+#include "ctrlseq/esc.h"
+#include "ctrlseq/csi.h"
+#include "ctrlseq/osc.h"
+#include "ctrlseq/dcs.h"
+#include "parse.h"
 const uint32_t color_list[COLORS];
 
 const uint8_t attr_mask[] = {
@@ -39,16 +47,9 @@ const char *fb_path = "/dev/fb0";
 const char *shell_cmd = "/bin/bash";
 const char *sb_default_segments = "all";
 
-/* sixel_copy2cell also calls these (scroll/CR not under test here) */
-void move_cursor(struct terminal_t *term, int y_offset, int x_offset)
-{
-	(void)term; (void)y_offset; (void)x_offset;
-}
-void cr(struct terminal_t *term)
-{
-	(void)term;
-}
-
+/* NOTE: move_cursor / cr / set_cursor / scroll are the REAL functions
+ * (terminal.h, included above) — no no-op stubs: the W section asserts
+ * kitty placement cursor bookkeeping through them. */
 static int failures;
 
 /* M-section fixtures: PicoCalc-style 320x320 framebuffer, 4bpp, truecolor */
@@ -79,6 +80,18 @@ static void expect(int cond, const char *msg)
 	} else {
 		fprintf(stderr, "ok: %s\n", msg);
 	}
+}
+
+/* Nav probes hand the matcher self-contained reads, so nothing may be
+ * held over: a nonzero keep would mean a probe buffer now spells an
+ * unfinished navigation sequence. */
+static int sbnav(struct terminal_t *term, const uint8_t *buf, int n)
+{
+	unsigned keep = 1;
+	int r = sb_consume_nav(term, buf, n, &keep);
+
+	expect(keep == 0, "nav probe holds nothing back");
+	return r;
 }
 
 static int wall_env_wants_shadow(void)
@@ -172,21 +185,22 @@ static int write_tiny_font(const char *path)
 
 static void free_term_cells(struct terminal_t *term)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, j;
 
-	if (!term->cells)
+	if (!scr->cells)
 		return;
 	for (i = 0; i < term->lines; i++) {
-		if (term->cells[i]) {
+		if (scr->cells[i]) {
 			for (j = 0; j < term->cols; j++)
-				cell_pixmap_clear(&term->cells[i][j]);
-			free(term->cells[i]);
+				cell_pixmap_clear(&scr->cells[i][j]);
+			free(scr->cells[i]);
 		}
 	}
-	free(term->cells);
-	term->cells = NULL;
-	free(term->line_dirty);
-	term->line_dirty = NULL;
+	free(scr->cells);
+	scr->cells = NULL;
+	free(scr->line_dirty);
+	scr->line_dirty = NULL;
 }
 
 /* Build a tiny CRUFTFN1 with space, '?' (row0 = bits 0-4) and U+3000 at 6x12.
@@ -342,6 +356,7 @@ static int write_tiny_sb4x8(const char *path)
 
 static int alloc_term_grid(struct terminal_t *term, int width, int height)
 {
+	struct screen_t *scr;
 	int i;
 
 	memset(term, 0, sizeof(*term));
@@ -351,17 +366,139 @@ static int alloc_term_grid(struct terminal_t *term, int width, int height)
 	term->lines = height / CELL_HEIGHT;
 	if (term->cols < 1 || term->lines < 1)
 		return -1;
-	term->line_dirty = calloc((size_t)term->lines, sizeof(bool));
-	term->cells = calloc((size_t)term->lines, sizeof(struct cell_t *));
-	if (!term->line_dirty || !term->cells)
+	/* Mirror term_init(): primary screen is the active one. */
+	term->active = 0;
+	scr = &term->scr[0];
+	scr->allocated  = true;
+	scr->line_dirty = calloc((size_t)term->lines, sizeof(bool));
+	scr->cells      = calloc((size_t)term->lines, sizeof(struct cell_t *));
+	if (!scr->line_dirty || !scr->cells)
 		return -1;
 	for (i = 0; i < term->lines; i++) {
-		term->cells[i] = calloc((size_t)term->cols, sizeof(struct cell_t));
-		if (!term->cells[i])
+		scr->cells[i] = calloc((size_t)term->cols, sizeof(struct cell_t));
+		if (!scr->cells[i])
 			return -1;
 	}
 	return 0;
 }
+
+/* W-section helpers: drive the real parse() on a 10x2 cell (60x24 px @
+ * 6x12) grid with a white background colour (index 7). */
+
+static const char st_b64a[] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void st_b64enc(const uint8_t *in, size_t n, char *out)
+{
+	size_t i = 0, o = 0;
+
+	while (i + 2 < n) {
+		uint32_t v = ((uint32_t) in[i] << 16) |
+			     ((uint32_t) in[i + 1] << 8) | in[i + 2];
+
+		out[o++] = st_b64a[(v >> 18) & 63];
+		out[o++] = st_b64a[(v >> 12) & 63];
+		out[o++] = st_b64a[(v >> 6) & 63];
+		out[o++] = st_b64a[v & 63];
+		i += 3;
+	}
+	if (i + 1 == n) {
+		uint32_t v = (uint32_t) in[i] << 16;
+
+		out[o++] = st_b64a[(v >> 18) & 63];
+		out[o++] = st_b64a[(v >> 12) & 63];
+		out[o++] = '=';
+		out[o++] = '=';
+	} else if (i + 2 == n) {
+		uint32_t v = ((uint32_t) in[i] << 16) |
+			     ((uint32_t) in[i + 1] << 8);
+
+		out[o++] = st_b64a[(v >> 18) & 63];
+		out[o++] = st_b64a[(v >> 12) & 63];
+		out[o++] = st_b64a[(v >> 6) & 63];
+		out[o++] = '=';
+	}
+	out[o] = '\0';
+}
+
+/* Cell accessor for the DCS section (active screen of term). */
+static struct cell_t *w_px(struct terminal_t *term, int row, int col)
+{
+	return &active_screen(term)->cells[row][col];
+}
+
+/* Builds "ESC _ G <ctrl> ; <b64> ESC \\", NUL terminated. */
+static uint8_t *w_apc(const char *ctrl, const char *b64)
+{
+	size_t cn = strlen(ctrl), bn = strlen(b64);
+	uint8_t *buf = malloc(cn + bn + 8);
+	size_t o = 0;
+
+	if (!buf)
+		return NULL;
+	buf[o++] = 0x1B;
+	buf[o++] = '_';
+	buf[o++] = 'G';
+	memcpy(buf + o, ctrl, cn);
+	o += cn;
+	buf[o++] = ';';
+	memcpy(buf + o, b64, bn);
+	o += bn;
+	buf[o++] = 0x1B;
+	buf[o++] = '\\';
+	buf[o] = '\0';
+	return buf;
+}
+
+/* Drain everything already flushed into the pipe into got. The writer
+ * (term.fd) stays open for the session, so read nonblocking and stop at
+ * EAGAIN (replies are well under PIPE_BUF, one read each). */
+static long w_drain(int fd, char *got, size_t cap)
+{
+	long off = 0;
+	int fl = fcntl(fd, F_GETFL, 0);
+
+	memset(got, 0, cap);
+	if (fl >= 0)
+		(void) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+	while (off < (long) cap - 1) {
+		ssize_t rd = read(fd, got + off, (size_t) cap - 1 - (size_t) off);
+
+		if (rd <= 0)
+			break;
+		off += rd;
+	}
+	return off;
+}
+
+static int u_setup(struct terminal_t *term)
+{
+	if (alloc_term_grid(term, 60, 24) < 0)
+		return -1;
+	active_screen(term)->cursor.x = active_screen(term)->cursor.y = 0;
+	active_screen(term)->scroll.top = 0;
+	active_screen(term)->scroll.bottom = term->lines - 1;
+	term->color_pair.fg = 7;
+	term->color_pair.bg = 7;
+	for (int i = 0; i < COLORS; i++)
+		term->virtual_palette[i] = (uint32_t) i * 0x01010101u;
+	term->virtual_palette[7] = 0x00FFFFFF; /* white, for alpha maths */
+	term->esc.size = ESCSEQ_SIZE;
+	term->esc.buf = (char *) calloc(1, (size_t) term->esc.size);
+	term->esc.bp = term->esc.buf;
+	term->esc.state = STATE_RESET;
+	return term->esc.buf ? 0 : -1;
+}
+
+static void u_teardown(struct terminal_t *term)
+{
+	/* mirrors term_die(): the kitty store/xfer outlive the cells */
+	kitty_grab_free(term);
+	free_term_cells(term);
+	free(term->esc.buf);
+	term->esc.buf = NULL;
+}
+
 
 int main(void)
 {
@@ -439,13 +576,15 @@ int main(void)
 	/* G: term_release_transient clears sixel canvas only */
 	g_cell_w = 6;
 	g_cell_h = 12;
+	struct screen_t *gscr;
 	expect(alloc_term_grid(&term, 36, 24) == 0, "G alloc grid");
+	gscr = active_screen(&term);
 	sixel_canvas_ensure(&term);
-	expect(cell_pixmap_ensure(&term.cells[0][0]) != NULL, "G cell pixmap");
-	term.cells[0][0].pixmap[0] = 0x5A;
+	expect(cell_pixmap_ensure(&gscr->cells[0][0]) != NULL, "G cell pixmap");
+	gscr->cells[0][0].pixmap[0] = 0x5A;
 	term_release_transient(&term);
 	expect(term.sixel.pixmap == NULL, "G release frees canvas");
-	expect(term.cells[0][0].pixmap && term.cells[0][0].pixmap[0] == 0x5A,
+	expect(gscr->cells[0][0].pixmap && gscr->cells[0][0].pixmap[0] == 0x5A,
 		"G release keeps cell pixmap");
 	free_term_cells(&term);
 
@@ -468,46 +607,50 @@ int main(void)
 	/* J: copy_cell deep-copies pixmap (ICH/DCH ownership) */
 	g_cell_w = 6;
 	g_cell_h = 12;
+	struct screen_t *jscr;
 	expect(alloc_term_grid(&term, 18, 12) == 0, "J alloc");
-	expect(cell_pixmap_ensure(&term.cells[0][0]) != NULL, "J ensure src");
-	term.cells[0][0].pixmap[0] = 0xC1;
-	term.cells[0][0].width = HALF;
-	term.cells[0][0].glyphp = glyph_get(DEFAULT_CHAR);
+	jscr = active_screen(&term);
+	expect(cell_pixmap_ensure(&jscr->cells[0][0]) != NULL, "J ensure src");
+	jscr->cells[0][0].pixmap[0] = 0xC1;
+	jscr->cells[0][0].width = HALF;
+	jscr->cells[0][0].glyphp = glyph_get(DEFAULT_CHAR);
 	copy_cell(&term, 0, 1, 0, 0);
-	expect(term.cells[0][1].has_pixmap && term.cells[0][1].pixmap, "J dst has pixmap");
-	expect(term.cells[0][1].pixmap != term.cells[0][0].pixmap, "J deep copy");
-	expect(term.cells[0][1].pixmap[0] == 0xC1, "J content");
-	cell_pixmap_clear(&term.cells[0][0]);
-	expect(term.cells[0][1].pixmap[0] == 0xC1, "J src clear leaves dst");
+	expect(jscr->cells[0][1].has_pixmap && jscr->cells[0][1].pixmap, "J dst has pixmap");
+	expect(jscr->cells[0][1].pixmap != jscr->cells[0][0].pixmap, "J deep copy");
+	expect(jscr->cells[0][1].pixmap[0] == 0xC1, "J content");
+	cell_pixmap_clear(&jscr->cells[0][0]);
+	expect(jscr->cells[0][1].pixmap[0] == 0xC1, "J src clear leaves dst");
 	free_term_cells(&term);
 
 	/* K: sixel_copy2cell must not read past canvas when cols is ceil(width/cw)
 	 * (PicoCalc-style 320%6!=0). Force cols=54 while width=320. */
 	g_cell_w = 6;
 	g_cell_h = 12;
+	struct screen_t *kscr;
 	memset(&term, 0, sizeof(term));
 	term.width = 320;
 	term.height = 24;
 	term.cols = 54; /* ceil(320/6); wider than width/CELL_WIDTH */
 	term.lines = 2;
-	term.line_dirty = calloc(2, sizeof(bool));
-	term.cells = calloc(2, sizeof(struct cell_t *));
-	expect(term.line_dirty && term.cells, "K meta");
-	term.cells[0] = calloc(54, sizeof(struct cell_t));
-	term.cells[1] = calloc(54, sizeof(struct cell_t));
-	expect(term.cells[0] && term.cells[1], "K rows");
+	kscr = active_screen(&term);
+	kscr->line_dirty = calloc(2, sizeof(bool));
+	kscr->cells = calloc(2, sizeof(struct cell_t *));
+	expect(kscr->line_dirty && kscr->cells, "K meta");
+	kscr->cells[0] = calloc(54, sizeof(struct cell_t));
+	kscr->cells[1] = calloc(54, sizeof(struct cell_t));
+	expect(kscr->cells[0] && kscr->cells[1], "K rows");
 	expect(sixel_canvas_ensure(&term) == 0, "K canvas");
 	canvas_bytes = (size_t)term.width * (size_t)term.height * (size_t)BYTES_PER_PIXEL;
 	memset(term.sixel.pixmap, 0xA5, canvas_bytes);
 	term.sixel.width = 320;
 	term.sixel.height = 12;
 	term.sixel.line_length = BYTES_PER_PIXEL * term.width;
-	term.cursor.x = 0;
-	term.cursor.y = 0;
+	kscr->cursor.x = 0;
+	kscr->cursor.y = 0;
 	sixel_copy2cell(&term, &term.sixel); /* ASAN fails on OOB without row clamp */
-	expect(term.cells[0][53].has_pixmap && term.cells[0][53].pixmap,
+	expect(kscr->cells[0][53].has_pixmap && kscr->cells[0][53].pixmap,
 		"K partial right cell filled");
-	lastpx = term.cells[0][53].pixmap;
+	lastpx = kscr->cells[0][53].pixmap;
 	expect(lastpx[0] == 0xA5 && lastpx[4] == 0xA5, "K partial cell got 2px");
 	expect(lastpx[2 * 4] == 0, "K bytes past clipped width stay clear");
 	sixel_canvas_free(&term);
@@ -540,6 +683,7 @@ int main(void)
 		expect(fdf >= 0, "M mkstemp");
 		if (fdf >= 0) {
 			struct framebuffer_t fbm;
+			struct screen_t *mscr;
 			uint8_t *mfp;
 
 			close(fdf);
@@ -551,23 +695,24 @@ int main(void)
 			memset(&term, 0, sizeof(term));
 			expect(alloc_term_grid(&term, M_W, M_H) == 0, "M alloc 53x26");
 			expect(term.cols == 53 && term.lines == 26, "M PicoCalc grid 53x26");
+			mscr = active_screen(&term);
 
 			/* populate cells: row 0 bg=1 (distinct from margin color 0),
 			 * other rows bg=0; '?' marker at (0,5) */
 			for (int y = 0; y < term.lines; y++) {
 				for (int x = 0; x < term.cols; x++) {
-					struct cell_t *c = &term.cells[y][x];
+					struct cell_t *c = &mscr->cells[y][x];
 
 					c->glyphp = (y == 0 && x == 5) ? glyph_get(0x3f): glyph_get(0x20);
 					c->color_pair.fg = 7;
 					c->color_pair.bg = (y == 0) ? 1: 0;
 					c->width = HALF;
 				}
-				term.line_dirty[y] = true;
+				mscr->line_dirty[y] = true;
 			}
 			term.mode = MODE_AMRIGHT; /* no cursor: keep assertions plain */
 			term.palette_modified = false;
-			term.cursor.x = term.cursor.y = 0;
+			mscr->cursor.x = mscr->cursor.y = 0;
 
 			memset(&fbm, 0, sizeof(fbm));
 			mfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
@@ -984,6 +1129,7 @@ int main(void)
 		expect(fqf >= 0, "Q mkstemp");
 		if (fqf >= 0) {
 			struct framebuffer_t fbq;
+			struct screen_t *qscr;
 			uint8_t *qfp;
 			const char *roots_saved[2];
 
@@ -1044,21 +1190,22 @@ int main(void)
 			term.lines = (M_H - term.oy) / CELL_HEIGHT; /* as term_init() */
 			expect(term.cols == 53 && term.lines == 26,
 				"Q grid 53x26 below the bar");
+			qscr = active_screen(&term);
 
 			for (int y = 0; y < term.lines; y++) {
 				for (int x = 0; x < term.cols; x++) {
-					struct cell_t *c = &term.cells[y][x];
+					struct cell_t *c = &qscr->cells[y][x];
 
 					c->glyphp = glyph_get(0x20);
 					c->color_pair.fg = 7;
 					c->color_pair.bg = 1;
 					c->width = HALF;
 				}
-				term.line_dirty[y] = true;
+				qscr->line_dirty[y] = true;
 			}
 			term.mode = MODE_AMRIGHT;
 			term.palette_modified = false;
-			term.cursor.x = term.cursor.y = 0;
+			qscr->cursor.x = qscr->cursor.y = 0;
 
 			memset(&fbq, 0, sizeof(fbq));
 			qfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
@@ -1161,8 +1308,8 @@ int main(void)
 					m_fill(qb, 0xFFFFFFFFu, M_W * M_H);
 					fbq.buf = qb;
 					for (int y = 0; y < term.lines; y++)
-						term.line_dirty[y] = false;
-					term.line_dirty[3] = true;
+						qscr->line_dirty[y] = false;
+					qscr->line_dirty[3] = true;
 					refresh(&fbq, &term);
 					for (int dy = 0; dy < CELL_HEIGHT; dy++) {
 						expect(m_px_at(qfp, 10,
@@ -1207,6 +1354,1205 @@ int main(void)
 			unlink(qsb);
 			unlink(qm);
 		}
+	}
+
+	/* R: screen split (struct screen_t, prep for DECALT): all screen
+	 * state routes through active_screen() to scr[0]; scr[1] stays
+	 * reserved and must never be allocated or written. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *rscr, *ralt;
+
+		expect(alloc_term_grid(&term, 36, 36) == 0, "R alloc 6x3");
+		rscr = active_screen(&term);
+		expect(term.active == 0, "R active is primary");
+		expect(rscr == &term.scr[0], "R accessor routes to scr[0]");
+		expect(rscr->allocated == true, "R primary marked allocated");
+		ralt = &term.scr[1];
+		expect(ralt->cells == NULL && ralt->line_dirty == NULL &&
+			ralt->tabstop == NULL && ralt->allocated == false,
+			"R alternate reserved");
+		expect(ralt->cursor.x == 0 && ralt->cursor.y == 0 &&
+			ralt->scroll.top == 0 && ralt->scroll.bottom == 0,
+			"R alternate zeroed");
+
+		/* writes via the public cell API must land in scr[0] */
+		expect(cell_pixmap_ensure(&rscr->cells[0][0]) != NULL, "R ensure");
+		rscr->cells[0][0].pixmap[0] = 0x77;
+		rscr->cells[0][0].width = HALF;
+		copy_cell(&term, 1, 2, 0, 0);
+		expect(rscr->cells[1][2].has_pixmap && rscr->cells[1][2].pixmap,
+			"R copy lands in scr[0]");
+		expect(rscr->cells[1][2].pixmap[0] == 0x77, "R copied content");
+		erase_cell(&term, 2, 3);
+		expect(rscr->line_dirty[2] == true, "R erase dirties scr[0]");
+		expect(ralt->cells == NULL, "R alternate still untouched");
+		free_term_cells(&term);
+	}
+
+	/* S: DECALT alternate screen (CSI ?1049h/l) through the real engine:
+	 * lazy alt alloc, wipe on entry, primary freeze, cursor/margin
+	 * parking, doubled/mismatched no-ops, RIS discard, re-entry. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *p, *a;
+		const struct glyph_t *qm = glyph_get(0x3f);
+
+		expect(term_init(&term, 96, 48), "S term_init 16x4");
+		expect(term.cols == 16 && term.lines == 4 && term.oy == 0,
+			"S grid 16x4 (no status bar)");
+
+		/* seed a primary marker, park cursor + margins */
+		set_cell(&term, 0, 1, qm);
+		set_cursor(&term, 2, 4);
+		active_screen(&term)->scroll.top = 1;
+
+		/* ---- enter */
+		enter_alt_screen(&term);
+		expect(term.active == 1, "S enter switches to alt");
+		expect(active_screen(&term) == &term.scr[1], "S accessor follows active");
+		a = &term.scr[1];
+		expect(a->cursor.x == 0 && a->cursor.y == 0, "S alt cursor homed");
+		expect(a->scroll.top == 0 && a->scroll.bottom == 3, "S alt margin full");
+		expect(a->cells[1][1].glyphp == glyph_get(DEFAULT_CHAR), "S alt wiped");
+		{
+			int all_dirty = 1;
+
+			for (int y = 0; y < 4; y++)
+				all_dirty &= a->line_dirty[y];
+			expect(all_dirty, "S alt all lines dirty");
+		}
+		expect(term.alt_saved.cursor.x == 4 && term.alt_saved.cursor.y == 2 &&
+			term.alt_saved.scroll.top == 1, "S primary state parked");
+		expect(term.scr[0].cells[0][1].glyphp == qm, "S primary frozen (marker)");
+
+		/* writes/scrolls inside the alt screen must not leak into the primary */
+		set_cell(&term, 1, 1, qm);
+		expect(a->cells[1][1].glyphp == qm, "S alt write lands in scr[1]");
+		set_cursor(&term, 3, 15);
+		move_cursor(&term, 1, 0); /* bottom edge: scroll up in alt */
+		expect(term.scr[0].cells[0][1].glyphp == qm, "S primary intact after alt scroll");
+		expect(a->cells[0][1].glyphp == qm, "S alt scroll moved row 1 -> 0");
+
+		/* ---- leave */
+		leave_alt_screen(&term);
+		expect(term.active == 0, "S leave back to primary");
+		p = active_screen(&term);
+		expect(p->cursor.x == 4 && p->cursor.y == 2, "S cursor restored");
+		expect(p->scroll.top == 1, "S margin restored");
+		expect(p->cells[0][1].glyphp == qm, "S primary marker visible again");
+		{
+			int all_dirty = 1;
+
+			for (int y = 0; y < 4; y++)
+				all_dirty &= p->line_dirty[y];
+			expect(all_dirty, "S primary forced full repaint");
+		}
+		expect(a->cells[0][1].glyphp == qm, "S alt content kept between visits");
+
+		/* ---- idempotency */
+		enter_alt_screen(&term); /* parks (4,2) again */
+		enter_alt_screen(&term); /* doubled: must not re-park the homed cursor */
+		leave_alt_screen(&term);
+		expect(p->cursor.x == 4 && p->cursor.y == 2,
+			"S doubled enter kept parked cursor");
+		leave_alt_screen(&term); /* mismatched: no-op */
+		expect(term.active == 0, "S doubled leave no-op");
+
+		/* ---- RIS discards the residence and the matrix */
+		enter_alt_screen(&term);
+		reset(&term);
+		expect(term.active == 0, "S RIS forces primary");
+		expect(a->cells == NULL && a->allocated == false,
+			"S RIS dropped alt matrix");
+		expect(p->cells[0][1].glyphp == glyph_get(DEFAULT_CHAR),
+			"S RIS wiped primary marker");
+
+		/* re-entry re-allocates lazily; term_die frees both screens */
+		enter_alt_screen(&term);
+		expect(term.active == 1 && a->cells != NULL, "S re-entry re-allocates");
+		leave_alt_screen(&term);
+		expect(a->cells != NULL, "S matrix kept between visits");
+		/* RIS must drop the resident matrix even while the primary is
+		 * active (the kept-between-visits case). */
+		reset(&term);
+		expect(term.active == 0 && a->cells == NULL,
+			"S RIS drops resident matrix on primary");
+		term_die(&term);
+		expect(term.scr[0].cells == NULL && a->cells == NULL,
+			"S term_die freed both screens");
+	}
+
+	/* T: scrollback ring (scrollback.c): feeding rules (full-primary
+	 * scrolls only), copied-row ownership, eviction order, viewport
+	 * mapping, nav keys (native page forms), RIS reset,
+	 * pixmap payload cap. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *tscr;
+		const struct glyph_t *qm = glyph_get(0x3f);
+		const uint8_t bare_up[]     = {ESC, '[', 'A'};
+		const uint8_t shift_up[]    = {ESC, '[', '1', ';', '2', 'A'};
+		const uint8_t plain_pgup[]  = {ESC, '[', '5', '~'};
+		const uint8_t plain_pgdwn[] = {ESC, '[', '6', '~'};
+		const uint8_t param_pgup[]  = {ESC, '[', '5', ';', '2', '~'};
+		const uint8_t ctrl_home[]   = {ESC, '[', '1', ';', '5', 'H'};
+		const uint8_t ctrl_end[]    = {ESC, '[', '1', ';', '5', 'F'};
+		const uint8_t bare_home[]   = {ESC, '[', '1', '~'};
+		const uint8_t mixed[]       = {ESC, '[', '5', '~', 'x'};
+
+		setenv("CRUFT_HISTORY", "4", 1);
+		expect(term_init(&term, 96, 48), "T term_init 16x4");
+		tscr = active_screen(&term);
+		expect(term.sb.cap == 4 && term.sb.count == 0 && term.sb.view == 0,
+			"T ring initialised (cap 4)");
+
+		/* one marker per row: the fg colour tags the drain order */
+		for (int y = 0; y < term.lines; y++) {
+			term.color_pair.fg = (uint8_t) (10 + y);
+			set_cell(&term, y, 0, qm);
+		}
+		term.color_pair.fg = DEFAULT_FG;
+
+		/* draining one row: a full-primary scroll feeds the ring */
+		set_cursor(&term, term.lines - 1, 0);
+		move_cursor(&term, 1, 0);
+		expect(term.sb.count == 1, "T full scroll drains a row");
+		expect(tscr->cells[0][0].color_pair.fg == 11, "T live screen scrolled");
+		term.sb.view = 1;
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == 10,
+			"T drained row is the old top");
+		expect(sb_view_row(&term, 1) == tscr->cells[0],
+			"T view 1: logical row 1 is live row 0");
+
+		/* five more: eviction keeps the youngest four */
+		for (int i = 0; i < 5; i++) {
+			int y = term.lines - 1;
+
+			term.color_pair.fg = (uint8_t) (20 + i);
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 4, "T ring capped at 4");
+		term.sb.view = term.sb.count; /* deepest: top line = oldest */
+		/* drain order was 10, 11, 12, 13, 20, 21 (each scroll drops the
+		 * row sliding off the top, not the row written at the bottom) */
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == 12, "T oldest survivor");
+		expect(sb_view_row(&term, 1)[0].color_pair.fg == 13, "T middle survivor");
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 21, "T newest survivor");
+		term.sb.view = 0;
+		expect(sb_view_row(&term, 0) == tscr->cells[0], "T view 0 maps to live");
+
+		/* sub-region and alt-screen scrolls never feed history */
+		tscr->scroll.top = 1;
+		set_cursor(&term, 1, 0);
+		move_cursor(&term, -1, 0);
+		expect(term.sb.count == 4, "T sub-region scroll does not drain");
+		tscr->scroll.top = 0;
+		term.sb.view = 2;
+		enter_alt_screen(&term);
+		expect(term.sb.view == 0, "T alt entry ends browsing");
+		set_cursor(&term, term.lines - 1, 0);
+		move_cursor(&term, 1, 0);
+		expect(term.sb.count == 4, "T alt scroll does not drain");
+		leave_alt_screen(&term);
+
+		/* navigation keys: the native page forms only (Shift+Up /
+		 * Shift+Down on the PicoCalc); every other form stays the
+		 * program's */
+		expect(sbnav(&term, bare_up, 3) == 0, "T bare arrow passes through");
+		expect(sbnav(&term, shift_up, (int)sizeof shift_up) == 0
+			   && term.sb.view == 0,
+			"T shift-modified arrow passes through");
+		expect(sbnav(&term, plain_pgup, 4) == 4 && term.sb.view == 2,
+			"T prior pages a half screen deeper");
+		expect(sbnav(&term, plain_pgdwn, 4) == 4 && term.sb.view == 0,
+			"T next pages back to the live tail");
+		expect(sbnav(&term, ctrl_home, 6) == 6 && term.sb.view == 4,
+			"T ctrl-home jumps to the oldest row");
+		expect(sbnav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+			"T ctrl-end jumps to the live tail");
+		{
+			/* The 3-byte head of bare Home is an ambiguous
+			 * Ctrl+Home prefix and must be held for the next
+			 * read; the full 4-byte key passes through (and
+			 * snaps the view) exactly as before. */
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, bare_home, 3, &carry) == 0
+				   && carry == 3 && term.sb.view == 2,
+				"T bare-home head held (ctrl-home ambiguity)");
+			expect(sbnav(&term, bare_home, (int)sizeof bare_home) == 0
+				   && term.sb.view == 0,
+				"T full bare home stays the program's");
+		}
+		term.sb.view = 2;
+		expect(sbnav(&term, param_pgup, 6) == 0 && term.sb.view == 0,
+			"T parameterised page form passes through and snaps");
+		term.sb.view = 3;
+		expect(sbnav(&term, mixed, 5) == 4 && term.sb.view == 0,
+			"T nav run then foreign byte snaps to live");
+		{
+			const uint8_t plain = 'x';
+
+			term.sb.view = 2;
+			expect(sbnav(&term, &plain, 1) == 0 && term.sb.view == 0,
+				"T plain key while browsing snaps to live");
+		}
+
+		/* A page key may arrive split across two reads (raw VMIN=1
+		 * delivers "ESC", then "[5~"); the unfinished prefix is held
+		 * for the next read and the view stays put until the held
+		 * bytes prove themselves foreign. cruft.c prepends the held
+		 * tail to the next buffer; emulated here. */
+		{
+			const uint8_t esc_only[] = {ESC};
+			const uint8_t pg_rest[]  = {'[', '5', '~'};
+			const uint8_t stray[]    = {'A'};
+			uint8_t st[16];
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, esc_only, 1, &carry) == 0
+				   && carry == 1 && term.sb.view == 2,
+				"T split nav holds lone ESC, view stays");
+			memcpy(st, esc_only, carry);
+			memcpy(st + carry, pg_rest, sizeof(pg_rest));
+			expect(sb_consume_nav(&term, st,
+					      (int)(carry + sizeof(pg_rest)),
+					      &carry) == 4
+				   && carry == 0 && term.sb.view == 4,
+				"T split nav completes to page-up");
+			term.sb.view = 2;
+			st[0] = ESC;
+			memcpy(st + 1, stray, sizeof(stray));
+			expect(sb_consume_nav(&term, st, 2, &carry) == 0
+				   && carry == 0 && term.sb.view == 0,
+				"T broken prefix forwarded, view snaps");
+		}
+
+		/* The prefix search stays anchored at the TRUE end of the
+		 * input even when foreign bytes precede it: only the
+		 * candidate length is capped, the suffix offset is not.
+		 * Foreign bytes snap the view (the user typed); the
+		 * trailing prefix is STILL held, so a page key completed
+		 * in the next read intercepts from the tail. */
+		{
+			const uint8_t esc_after5[] = { 'a', 'b', 'c', 'd', 'e', ESC };
+			const uint8_t pg_tail6[]   = { 'x', 'x', 'x', ESC, '[', '5' };
+			const uint8_t foreign6[]   = { 'a', 'b', 'c', 'd', 'e', 'f' };
+			const uint8_t pg_rest[]     = { '[', '5', '~' };
+			uint8_t st[16];
+			unsigned carry;
+
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, esc_after5, 6, &carry) == 0
+				   && carry == 1 && term.sb.view == 0,
+				"T lone ESC held after 5 foreign bytes");
+			/* the held ESC + the split page-up completing it in
+			 * the next read must still intercept */
+			st[0] = esc_after5[5];
+			memcpy(st + 1, pg_rest, sizeof(pg_rest));
+			expect(sb_consume_nav(&term, st,
+					      (int)(1 + sizeof(pg_rest)),
+					      &carry) == 4
+				   && carry == 0 && term.sb.view > 0,
+				"T held ESC after long input completes to page-up");
+			term.sb.view = 2;
+			expect(sb_consume_nav(&term, pg_tail6, 6, &carry) == 0
+				   && carry == 3 && term.sb.view == 0,
+				"T page-up tail held after 3 foreign bytes");
+			expect(sb_consume_nav(&term, foreign6, 6, &carry) == 0
+				   && carry == 0 && term.sb.view == 0,
+				"T all-foreign run forwards, view snaps");
+		}
+		/* Back to the tail: stored rows leave the live lines clean, so
+		 * every line must be re-flagged or the lazy painter would
+		 * keep history pixels on screen. */
+		for (int y = 0; y < term.lines; y++)
+			tscr->line_dirty[y] = false;
+		term.sb.view = 3;
+		{
+			bool all = true;
+
+			expect(sbnav(&term, ctrl_end, 6) == 6 && term.sb.view == 0,
+				"T ctrl-end settles at the tail from deep");
+			for (int y = 0; y < term.lines; y++)
+				all &= tscr->line_dirty[y];
+			expect(all, "T ctrl-end re-dirties every line");
+		}
+		for (int y = 0; y < term.lines; y++)
+			tscr->line_dirty[y] = false;
+		term.sb.view = 3;
+		{
+			bool all = true;
+
+			expect(sbnav(&term, mixed, 5) == 4 && term.sb.view == 0,
+				"T foreign byte snaps to live");
+			for (int y = 0; y < term.lines; y++)
+				all &= tscr->line_dirty[y];
+			expect(all, "T snap-back re-dirties every line");
+		}
+
+		/* RIS resets the ring; an empty ring lets nav pass through */
+		reset(&term);
+		expect(term.sb.count == 0 && term.sb.view == 0, "T RIS empties ring");
+		expect(sbnav(&term, plain_pgup, 4) == 0,
+			"T no history: nav passes through");
+		/* tear down this generation before the re-init below, which
+		 * would otherwise leak the ring, matrices and esc buffer */
+		term_die(&term);
+
+		/* CRUFT_HISTORY=0 disables the ring entirely */
+		setenv("CRUFT_HISTORY", "0", 1);
+		expect(term_init(&term, 96, 48), "T re-init disabled");
+		expect(term.sb.cap == 0 && term.sb.rows == NULL, "T CRUFT_HISTORY=0 off");
+		set_cursor(&term, term.lines - 1, 0);
+		move_cursor(&term, 1, 0);
+		expect(term.sb.count == 0, "T disabled ring not fed");
+		term_die(&term);
+
+		/* sixel payload cap: newest art survives, oldest degrades */
+		setenv("CRUFT_HISTORY", "512", 1);
+		expect(term_init(&term, 96, 48), "T cap-512 term_init");
+		for (int i = 0; i < 400; i++) {
+			int y = term.lines - 1;
+			uint8_t *pm = cell_pixmap_ensure(&active_screen(&term)->cells[y][0]);
+
+			/* the cell is re-erased after every scroll, so the pointer
+			 * must not be held across iterations */
+			if (pm) {
+				pm[0] = (uint8_t) i;
+				pm[1] = (uint8_t) (i >> 8);
+			}
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 400, "T 400 rows stored");
+		expect(term.sb.pixmap_bytes > 0
+			&& term.sb.pixmap_bytes <= (size_t) SB_PIXMAP_CAP_KIB * 1024,
+			"T pixmap payload capped");
+		term.sb.view = term.sb.count;
+		expect(sb_view_row(&term, 0)[0].has_pixmap == false, "T oldest art degraded");
+		term.sb.view = 4;
+		/* the newest stored row carries the marker written 3 scrolls
+		 * earlier (the live bottom is not in the ring yet) */
+		expect(sb_view_row(&term, 3)[0].has_pixmap
+			&& sb_view_row(&term, 3)[0].pixmap[0] == (uint8_t) 396
+			&& sb_view_row(&term, 3)[0].pixmap[1] == 1,
+			"T newest art kept deep-copied");
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+
+		/* Bar geometry on 320x320: the first stored row anchors the
+		 * grid left (x0 is grid, not margin) and the 2px slider rides
+		 * the right edge; track palette 8, thumb palette 7. Direction
+		 * is pinned with view == total (the OLDEST row, top of the
+		 * document): thumb height 312*26/28 = 289, offset
+		 * (312-289)*(2-2)/2 = 0, so the thumb spans y 0..288 (a
+		 * view-scaled, not total-view-scaled, offset would put it at
+		 * y 23..311 for this state). */		memset(&term, 0, sizeof(term));
+		expect(alloc_term_grid(&term, M_W, M_H) == 0, "T bar fixture 53x26");
+		{
+			struct framebuffer_t fbm;
+			uint8_t *mfp = (uint8_t *) ecalloc(1, (size_t) M_W * M_H * 4);
+
+			expect(mfp != NULL, "T bar fp alloc");
+			for (int y = 0; y < term.lines; y++)
+				for (int x = 0; x < term.cols; x++) {
+					struct cell_t *c = &term.scr[0].cells[y][x];
+
+					c->glyphp = glyph_get(0x20);
+					c->color_pair.fg = 7;
+					c->color_pair.bg = 1;
+					c->width = HALF;
+				}
+			for (int y = 0; y < term.lines; y++)
+				term.scr[0].line_dirty[y] = true;
+			term.mode = MODE_AMRIGHT;
+
+			/* synthetic non-empty ring (fixture predates sb_init) */
+			term.sb.cap = 4;
+			term.sb.count = 2;
+			term.sb.head = 2;
+			term.sb.view = 2; /* == total: browsing the oldest row */
+			term.sb.disk.fd = -1; /* mirror term_init(): the zeroed
+						* sb must not read as stdin when
+						* term_die tears the tier down */			term.sb.rows = (struct cell_t **) ecalloc(4, sizeof(*term.sb.rows));
+			term.sb.rows[0] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
+			term.sb.rows[1] = (struct cell_t *) ecalloc(term.cols, sizeof(struct cell_t));
+			expect(term.sb.rows && term.sb.rows[0] && term.sb.rows[1], "T ring synth");
+			/* stored rows are populated copies in production */
+			for (int r = 0; r < 2; r++)
+				for (int x = 0; x < term.cols; x++) {
+					struct cell_t *c = &term.sb.rows[r][x];
+
+					c->glyphp = glyph_get(0x20);
+					c->color_pair.fg = 7;
+					c->color_pair.bg = 1;
+					c->width = HALF;
+				}
+
+			m_fill(mfp, 0xEFEFEFEFu, M_W * M_H);
+			memset(&fbm, 0, sizeof(fbm));
+			fbm.fp = mfp;
+			fbm.info.width = M_W;
+			fbm.info.height = M_H;
+			fbm.info.line_length = M_W * 4;
+			fbm.info.bytes_per_pixel = 4;
+			fbm.info.bits_per_pixel = 32;
+			fbm.info.type = YAFT_FB_TYPE_PACKED_PIXELS;
+			fbm.info.visual = YAFT_FB_VISUAL_TRUECOLOR;
+			fbm.info.red.length = 8;   fbm.info.red.offset = 16;
+			fbm.info.green.length = 8; fbm.info.green.offset = 8;
+			fbm.info.blue.length = 8;  fbm.info.blue.offset = 0;
+			for (int i = 0; i < COLORS; i++)
+				fbm.real_palette[i] = (uint32_t) i * 0x01010101u;
+
+			refresh(&fbm, &term);
+			expect(m_px_at(mfp, 0, 0) == 0x01010101u, "T grid anchored left");
+			expect(m_px_at(mfp, 317, 0) == 0x01010101u, "T grid reaches x317");
+			expect(m_px_at(mfp, 318, 5) == 0x07070707u, "T bar thumb pinned to the top (oldest row)");			expect(m_px_at(mfp, 319, 100) == 0x07070707u, "T bar thumb");
+			expect(m_px_at(mfp, 318, 305) == 0x08080808u, "T bar track (below thumb)");
+			expect(m_px_at(mfp, 318, 315) == 0x00000000u, "T below grid is margin, not bar");
+			free(mfp);
+		}
+		term_die(&term);
+	}
+
+	/* U: disk tier (sbdisk.c): spill past the RAM depth, tier boundary
+	 * mapping, nav over the combined depth, push pinning, compaction,
+	 * pixmap survival on disk, corrupt-file degradation, unlink on
+	 * reset and death. */
+	g_cell_w = 6;
+	g_cell_h = 12;
+	{
+		struct screen_t *uscr;
+		const struct glyph_t *qm = glyph_get(0x3f);
+		const uint8_t plain_pgup[]  = {ESC, '[', '5', '~'};
+		const uint8_t plain_pgdwn[] = {ESC, '[', '6', '~'};
+		const uint8_t ctrl_end[]    = {ESC, '[', '1', ';', '5', 'F'};
+
+		/* total 10, RAM tier 3: the disk tier takes the other 7 */
+		setenv("CRUFT_HISTORY", "10", 1);
+		setenv("CRUFT_SB_RAM", "3", 1);
+		expect(term_init(&term, 96, 48), "U term_init 16x4");
+		uscr = active_screen(&term);
+		expect(term.sb.cap == 3 && term.sb.disk.cap == 7,
+			"U split 3 RAM / 7 disk");
+		expect(term.sb.disk.fd < 0 && sb_history_total(&term) == 0,
+			"U disk lazy, nothing stored");
+
+		/* three pushes fill the RAM tier; nothing spills yet */
+		for (int i = 0; i < 3; i++) {
+			int y = term.lines - 1;
+
+			term.color_pair.fg = (uint8_t) (40 + i);
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 3 && term.sb.disk.count == 0
+			&& term.sb.disk.fd < 0,
+			"U RAM tier fills before spill");
+
+		/* seven more: each eviction appends a record to the file */
+		for (int i = 3; i < 10; i++) {
+			int y = term.lines - 1;
+
+			term.color_pair.fg = (uint8_t) (40 + i);
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 3 && term.sb.disk.count == 7,
+			"U 10 pushes: 3 RAM + 7 disk");
+		expect(term.sb.disk.fd >= 0 && term.sb.disk.path[0],
+			"U disk attached after first spill");
+		{
+			struct stat st;
+
+			expect(stat(term.sb.disk.path, &st) == 0 && st.st_size > 20,
+				"U history file on disk");
+		}
+		/* Drains d1..d10: d_J (J>=4) carries marker 40+J-4, the first
+		 * three are unmarked seeds (fg DEFAULT_FG). */
+		term.sb.view = 10;
+		/* the top window shows the OLDEST rows: line 0 is the top of the
+		 * oldest row, line 3 its bottom */
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == DEFAULT_FG,
+			"U top: oldest row (a seed) at the top");
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 40,
+			"U top: window bottom is d4 (disk)");
+		/* the RAM/disk seam sits between views 7 and 6 (bottom line) */
+		term.sb.view = 7;
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 43,
+			"U seam: view 7 bottom from disk");
+		term.sb.view = 6;
+		expect(sb_view_row(&term, 3)[0].color_pair.fg == 44,
+			"U seam: view 6 bottom from RAM");
+		/* a disk row is neither a live row nor a ring slot */
+		term.sb.view = 10;
+		{
+			const struct cell_t *r = sb_view_row(&term, 0);
+			bool alien = r != uscr->cells[0] && r != uscr->cells[1]
+				     && r != uscr->cells[2] && r != uscr->cells[3]
+				     && term.sb.rows && r != term.sb.rows[0]
+				     && r != term.sb.rows[1] && r != term.sb.rows[2];
+
+			expect(alien, "U disk row is decoded, not borrowed");
+		}
+		/* nav spans both tiers: page to the live tail, back to the
+		 * oldest row (five half-pages each way at total 10) */
+		for (int p = 0; p < 5; p++)
+			expect(sbnav(&term, plain_pgdwn, 4) == 4, "U pgdn consumed");
+		expect(term.sb.view == 0, "U paging reaches the live tail");
+		for (int p = 0; p < 5; p++)
+			expect(sbnav(&term, plain_pgup, 4) == 4, "U pgup consumed");
+		expect(term.sb.view == 10, "U paging reaches the oldest row");
+
+		/* push while browsing MID-history: the window stays put
+		 * (view pinned +1), the oldest row is compacted away */
+		term.sb.view = 5;
+		{
+			int y = term.lines - 1;
+
+			term.color_pair.fg = 50;
+			set_cell(&term, y, 0, qm);
+			term.color_pair.fg = DEFAULT_FG;
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(sb_history_total(&term) == 10 && term.sb.view == 6,
+			"U push pins the browsed row");
+		expect(sb_view_row(&term, 0)[0].color_pair.fg == 42
+			&& sb_view_row(&term, 3)[0].color_pair.fg == 45,
+			"U window content stayed put");
+
+		/* mid-file damage degrades the tier: blank lines, RAM only,
+		 * file dropped, nav still sound */
+		{
+			int cfd = open(term.sb.disk.path, O_RDWR);
+
+			expect(cfd >= 0 && ftruncate(cfd, 21) == 0 && !close(cfd),
+				"U corruption prepared (trunc mid-record)");
+		}
+		{
+			char dead[128];
+			const struct cell_t *r;
+
+			memcpy(dead, term.sb.disk.path, sizeof(dead));
+			r = sb_view_row(&term, 1); /* not cached: must hit the file */
+
+			expect(r != NULL && r[0].color_pair.fg == DEFAULT_FG,
+				"U corrupt file serves blank rows");
+			expect(sb_history_total(&term) == 3,
+				"U tier degraded: RAM only");
+			expect(stat(dead, &(struct stat) { 0 }) != 0,
+				"U corrupt file unlinked");
+			expect(sbnav(&term, ctrl_end, 6) == 6
+				&& term.sb.view == 0,
+				"U nav healthy after degrade");
+		}
+		term_die(&term);
+
+		/* A grid wider than the 512-cell static fallback: a
+		 * degraded tier must still serve a blank row spanning
+		 * term->cols. Only the session row - which outlives
+		 * teardown - can satisfy that; the old static read OOB
+		 * (proven by the ASan lane). */
+		setenv("CRUFT_HISTORY", "12", 1);
+		setenv("CRUFT_SB_RAM", "2", 1);
+		expect(term_init(&term, 3200, 96), "U wide term_init");
+		expect(term.cols > 512,
+			"U wide grid exceeds the static fallback");
+		for (int i = 0; i < 12; i++) {
+			int y = term.lines - 1;
+
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.disk.count > 0, "U wide spill engaged");
+		{
+			int cfd = open(term.sb.disk.path, O_RDWR);
+
+			expect(cfd >= 0 && ftruncate(cfd, 21) == 0 && !close(cfd),
+				"U wide corruption prepared");
+		}
+		{
+			const struct cell_t *r;
+
+			term.sb.view = 12; /* window top = oldest = disk */
+			r = sb_view_row(&term, 0);
+			expect(r != NULL
+				&& r[512].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[512].has_pixmap == false
+				&& r[term.cols - 1].glyphp == glyph_get(DEFAULT_CHAR)
+				&& r[term.cols - 1].width == HALF,
+				"U degraded blank row spans the wide grid");
+			expect(sb_history_total(&term) == 2,
+				"U wide tier degraded: RAM only");
+		}
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+		unsetenv("CRUFT_SB_RAM");
+		/* pixmaps survive the trip to disk: total 6, RAM 2, disk 4 */
+		setenv("CRUFT_HISTORY", "6", 1);
+		setenv("CRUFT_SB_RAM", "2", 1);
+		expect(term_init(&term, 96, 48), "U pixmap term_init");
+		for (int i = 0; i < 6; i++) {
+			int y = term.lines - 1;
+			uint8_t *pm = cell_pixmap_ensure(&active_screen(&term)->cells[y][0]);
+
+			/* marker i+1 keeps every stored payload non-zero */
+			if (pm) {
+				pm[0] = (uint8_t) (i + 1);
+				pm[1] = (uint8_t) ((i + 1) >> 8);
+			}
+			set_cursor(&term, y, 0);
+			move_cursor(&term, 1, 0);
+		}
+		expect(term.sb.count == 2 && term.sb.disk.count == 4,
+			"U pixmap split 2 RAM / 4 disk");
+		term.sb.view = 6;
+		/* the window's bottom line is d4 (disk, marker 1); its top
+		 * line is d1, the first seed (art-free) */
+		expect(sb_view_row(&term, 3)[0].has_pixmap
+			&& sb_view_row(&term, 3)[0].pixmap[0] == 1
+			&& sb_view_row(&term, 3)[0].pixmap[1] == 0,
+			"U disk row kept its pixmap");
+		expect(sb_view_row(&term, 0)[0].has_pixmap == false,
+			"U seed row art-free from disk");
+		term.sb.view = 4;
+		expect(sb_view_row(&term, 3)[0].has_pixmap
+			&& sb_view_row(&term, 3)[0].pixmap[0] == 3,
+			"U RAM row still direct (regression)");
+
+		/* reset drops the ring AND unlinks the session file */
+		{
+			char dead[128];
+
+			memcpy(dead, term.sb.disk.path, sizeof(dead));
+			reset(&term);
+			expect(sb_history_total(&term) == 0 && term.sb.view == 0,
+				"U reset empties both tiers");
+			expect(stat(dead, &(struct stat) { 0 }) != 0,
+				"U reset unlinked the file");
+		}
+		term_die(&term);
+		unsetenv("CRUFT_HISTORY");
+		unsetenv("CRUFT_SB_RAM");
+	}
+
+	/* V: /etc/cruft.conf loader (conf.c): grammar, validity, and
+	 * environment precedence. */
+	{
+		static const char *vkeys[6] = {
+			"CRUFT_FONT", "CRUFT_SB", "CRUFT_SB_FONT",
+			"CRUFT_SB_12H", "CRUFT_HISTORY", "CRUFT_SB_RAM",
+		};
+		char *saved[6];
+		char tp[64];
+
+		for (int i = 0; i < 6; i++) {
+			const char *v = getenv(vkeys[i]);
+
+			saved[i] = (v == NULL) ? NULL: strdup(v);
+			unsetenv(vkeys[i]);
+		}
+		snprintf(tp, sizeof(tp), "/tmp/cruft-conf-%d", (int) getpid());
+		conf_load_file("/nonexistent/cruft.conf-V");
+		expect(getenv("CRUFT_HISTORY") == NULL, "V missing file is a no-op");
+
+		FILE *cf;
+		char fntp[64];
+		char garb[64];
+
+		snprintf(fntp, sizeof(fntp), "/tmp/cruft-conf-%d-f.font",
+			 (int) getpid());
+		snprintf(garb, sizeof(garb), "/tmp/cruft-conf-%d-g.txt",
+			 (int) getpid());
+		expect(write_tiny_font(fntp) == 0, "V fixture font written");
+		unlink(tp);
+		cf = fopen(tp, "w");
+		expect(cf != NULL, "V temp path ready");
+		if (cf == NULL)
+			goto v_cleanup;
+		fprintf(cf, "# V well-formed config\n"
+		        "CRUFT_FONT=%s\n"
+		        "CRUFT_SB=time,battery\n"
+		        "CRUFT_SB_FONT=/s.fnt\n"
+		        "CRUFT_SB_12H=1\n"
+		        "  CRUFT_HISTORY = 8192  \n"
+		        "CRUFT_SB_RAM=256\n",
+			fntp);
+		fclose(cf);
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_FONT"), fntp) == 0
+		       && strcmp(getenv("CRUFT_SB"), "time,battery") == 0
+		       && strcmp(getenv("CRUFT_SB_FONT"), "/s.fnt") == 0
+		       && strcmp(getenv("CRUFT_SB_12H"), "1") == 0,
+			"V font/SB knobs from file");
+		expect(strcmp(getenv("CRUFT_HISTORY"), "8192") == 0
+		       && strcmp(getenv("CRUFT_SB_RAM"), "256") == 0,
+			"V depth knobs (padding trimmed) from file");
+
+		setenv("CRUFT_HISTORY", "77", 1);
+		cf = fopen(tp, "a");
+		expect(cf != NULL, "V temp path appendable");
+		if (cf == NULL)
+			goto v_cleanup;
+		fputs("CRUFT_HISTORY=99\n", cf);
+		fclose(cf);
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_HISTORY"), "77") == 0,
+			"V environment beats file");
+		unsetenv("CRUFT_HISTORY");
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_HISTORY"), "99") == 0,
+			"V file value once env is clear");
+
+		/* A blank between segments is exactly what
+		 * sb_parse_segments() squeezes into commas: the loader
+		 * installs "time, battery" verbatim instead of refusing
+		 * it and leaving the default selection in effect. */
+		cf = fopen(tp, "a");
+		expect(cf != NULL, "V temp path appendable (2)");
+		if (cf == NULL)
+			goto v_cleanup;
+		fputs("CRUFT_SB=time, battery\n", cf);
+		fclose(cf);
+		unsetenv("CRUFT_SB"); /* the first load installed "time,battery" */
+		conf_load_file(tp);
+		expect(strcmp(getenv("CRUFT_SB"), "time, battery") == 0,
+			"V SB list with a space installs verbatim");
+
+		/* A file-supplied CRUFT_FONT that glyph_mmap_init() would
+		 * choke on (missing file, or an existing file that is not
+		 * a font) must be refused so the built-in font stands;
+		 * the last valid line wins, so the garbage file decides. */
+		cf = fopen(garb, "w");
+		expect(cf != NULL, "V garbage path writable");
+		if (cf == NULL)
+			goto v_cleanup;
+		fputs("not a font\n", cf);
+		fclose(cf);
+		cf = fopen(tp, "a");
+		expect(cf != NULL, "V temp path appendable (3)");
+		if (cf == NULL)
+			goto v_cleanup;
+		fprintf(cf, "CRUFT_FONT=/nonexistent/v.font\n"
+		        "CRUFT_FONT=%s\n", garb);
+		fclose(cf);
+		unsetenv("CRUFT_FONT");
+		conf_load_file(tp);
+		expect(getenv("CRUFT_FONT") == NULL,
+			"V unusable file font never installed");
+
+		cf = fopen(tp, "w");
+		expect(cf != NULL, "V temp path rewritable (junk)");
+		if (cf == NULL)
+			goto v_cleanup;
+		fputs("\n   # only junk below\n"
+		      "CRUFT_HISTORY=abc\n"
+		      "CRUFT_SB=bad;value\n"
+		      "CRUFT_SB_12H=2\n"
+		      "CRUFT_SB=\n"
+		      "NOT_A_KEY=1\n"
+		      "no equals here\n"
+		      "CRUFT_FONT\n", cf);
+		fclose(cf);
+		for (int i = 0; i < 6; i++)
+			unsetenv(vkeys[i]);
+		conf_load_file(tp);
+		for (int i = 0; i < 6; i++)
+			expect(getenv(vkeys[i]) == NULL,
+				"V invalid or unknown lines never installed");
+
+		/* Overlong physical line (>255 bytes) is discarded whole: a
+		 * KEY=VALUE wrapped past the fgets boundary must not surface
+		 * at the next read as if it were a new line, and parsing must
+		 * resume at the line after it. */
+		{
+			char pad[256];
+
+			memset(pad, '#', sizeof pad - 1);
+			pad[sizeof pad - 1] = '\0';
+			cf = fopen(tp, "w");
+			expect(cf != NULL, "V temp path rewritable");
+			if (cf == NULL)
+				goto v_cleanup;
+			fprintf(cf, "%sCRUFT_SB_12H=1\nCRUFT_SB_RAM=256\n", pad);
+			fclose(cf);
+			for (int i = 0; i < 6; i++)
+				unsetenv(vkeys[i]);
+			conf_load_file(tp);
+			expect(getenv("CRUFT_SB_12H") == NULL,
+				"V overlong line tail (wrapped key) drained");
+			expect(strcmp(getenv("CRUFT_SB_RAM"), "256") == 0,
+				"V line after an overlong one still parses");
+		}
+	v_cleanup:
+		unlink(tp);
+		unlink(fntp);
+		unlink(garb);
+
+		for (int i = 0; i < 6; i++) {
+			if (saved[i] != NULL)
+				setenv(vkeys[i], saved[i], 1);
+			free(saved[i]);
+		}
+	}
+
+	/* W: kitty graphics transfer (APC _G / DCS +) end to end: probe,
+	 * chunked transfer, Unicode-placeholder display, a=p re-place,
+	 * delete, direct placement and the probe replies. Own 6x12 font
+	 * (the V section tears its mmap down, zeroing the metrics); grid
+	 * is 10x2 cells. */
+	{
+		int rp[2] = { -1, -1 };
+		char got[1024];
+		char wt[40];
+		char wfont[80];
+		int wf;
+
+		expect(pipe(rp) == 0, "W pipe");
+		snprintf(wt, sizeof wt, "/tmp/cruft-st-W-XXXXXX");
+		wf = mkstemp(wt);
+		expect(wf >= 0, "W mkstemp");
+		if (wf >= 0) {
+			close(wf);
+			unlink(wt);
+			snprintf(wfont, sizeof wfont, "%s.cruftfont", wt);
+			expect(write_tiny_font6x12(wfont) == 0, "W write 6x12 font");
+			expect(glyph_mmap_init(wfont) == 1, "W glyph init");
+			unlink(wfont);
+		}
+		if (rp[0] >= 0) {
+			uint8_t *sq;
+
+			expect(u_setup(&term) == 0, "W base setup");
+			term.fd = rp[1];
+			term.color_pair.bg = 0; /* blend over black, not u_setup's white */
+
+			/* W1: capability probe (ratatui's exact sequence) */
+			sq = w_apc("i=31,s=1,v=1,a=q,t=d,f=24", "AAAA");
+			parse(&term, sq, (int) strlen((const char *) sq));
+			free(sq);
+			expect(w_drain(rp[0], got, sizeof got) > 0, "W1 drained");
+			expect(memcmp(got, "\033_Gi=31;OK\033\\",
+					strlen("\033_Gi=31;OK\033\\")) == 0,
+				"W1 probe reply exact");
+
+			/* W2: DA1 advertises sixel (probe attribute 4 + 6) */
+			sq = (uint8_t *) malloc(4);
+			if (sq) {
+				memcpy(sq, "\033[c", 4);
+				parse(&term, sq, 3);
+				free(sq);
+			}
+			expect(w_drain(rp[0], got, sizeof got) > 0, "W2 drained");
+			expect(strstr(got, "\033[?62;4;6c") != NULL, "W2 DA1 sixel");
+
+			/* W3: cell size report (font size for the picker) */
+			sq = (uint8_t *) malloc(5);
+			if (sq) {
+				memcpy(sq, "\033[16t", 5);
+				parse(&term, sq, 5);
+				free(sq);
+			}
+			expect(w_drain(rp[0], got, sizeof got) > 0, "W3 drained");
+			expect(strstr(got, "\033[16;12;6t") != NULL, "W3 cell size");
+
+			/* W4: chunked virtual placement, then placeholder display */
+			{
+				uint8_t px[12 * 12 * 4];
+				char b64[1024], b64a[512], b64b[512];
+				int sx, sy;
+
+				for (sy = 0; sy < 12; sy++)
+					for (sx = 0; sx < 12; sx++) {
+						uint8_t *p = &px[(sy * 12 + sx) * 4];
+
+						if (sx < 6) /* red, opaque */
+							p[0] = 255, p[1] = 0, p[2] = 0, p[3] = 255;
+						else            /* blue, opaque */
+							p[0] = 0, p[1] = 0, p[2] = 255, p[3] = 255;
+					}
+				st_b64enc(px, sizeof px, b64);
+				/* split the base64 at a 3-byte boundary (340 chars) */
+				memcpy(b64a, b64, 340);
+				b64a[340] = '\0';
+				memcpy(b64b, b64 + 340, 768 - 340);
+				b64b[768 - 340] = '\0';
+
+				u_teardown(&term); /* release the W base fixture */
+				expect(u_setup(&term) == 0, "W4 alloc");
+				term.fd = rp[1];
+				term.color_pair.bg = 0; /* blend over black, not u_setup's white */
+
+				sq = w_apc("i=1,a=T,U=1,f=32,t=d,s=12,v=12,c=2,r=1,m=1", b64a);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_px(&term, 0, 0)->has_pixmap == false,
+					"W4 stored, not painted yet");
+
+				sq = w_apc("m=0", b64b);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) > 0, "W4 drained");
+				expect(strstr(got, "\033_Gi=1;OK") != NULL, "W4 OK reply");
+
+				/* q=2 (ratatui-image) silences OK too: an unread reply
+				 * would fill the pty input queue and deadlock cruft */
+				sq = w_apc("q=2,i=77,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", b64a);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) <= 0, "W4 q=2 silent");
+				expect(w_px(&term, 0, 0)->has_pixmap == false,
+					"W4 still only stored");
+
+				/* placeholder row: anchor (diacritics row=0 col=0
+				 * hi=0) + one inherited cell, SGR truecolor fg
+				 * carries id 1 (rgb 0,0,1) */
+				{
+					uint8_t phseq[] = {
+						0x1B, '[', '3', '8', ';', '2', ';', '0',
+						';', '0', ';', '1', 'm',
+						0xF4, 0x8E, 0xBB, 0xAE, /* U+10EEEE */
+						0xCC, 0x85, 0xCC, 0x85, 0xCC, 0x85, /* d(0)d(0)d(0) */
+						0xF4, 0x8E, 0xBB, 0xAE, /* inherited cell */
+						'\n',
+						0x1B, '[', '3', '9', 'm',
+					};
+
+					parse(&term, phseq, (int) sizeof phseq);
+					expect(w_px(&term, 0, 0)->has_pixmap
+							&& w_px(&term, 0, 0)->pixmap[2] == 0xFF
+							&& w_px(&term, 0, 0)->pixmap[0] == 0x00,
+						"W4 left half red");
+					expect(w_px(&term, 0, 1)->has_pixmap
+							&& w_px(&term, 0, 1)->pixmap[0] == 0xFF
+							&& w_px(&term, 0, 1)->pixmap[2] == 0x00,
+						"W4 right half blue");
+					expect(active_screen(&term)->cursor.x == 2
+							&& active_screen(&term)->cursor.y == 1,
+						"W4 cursor past the placement");
+				}
+
+				/* ratatui-image form: only row+col diacritics (2 marks),
+				 * every cell carries them, the row ends in a CSI - the
+				 * anchor must still be placed */
+				{
+					uint8_t phseq2[] = {
+						0x1B, '[', '2', ';', '1', 'H',
+						0x1B, '[', '3', '8', ';', '2', ';', '0',
+						';', '0', ';', '1', 'm',
+						0xF4, 0x8E, 0xBB, 0xAE, 0xCC, 0x85, 0xCC, 0x85,
+						0xF4, 0x8E, 0xBB, 0xAE, 0xCC, 0x85, 0xCD, 0x8E,
+						0x1B, '[', '3', '9', 'm',
+					};
+
+					parse(&term, phseq2, (int) sizeof phseq2);
+					expect(w_px(&term, 1, 0)->has_pixmap
+							&& w_px(&term, 1, 1)->has_pixmap,
+						"W4 two-diacritic placeholders paint");
+				}
+
+				/* W5: a=p re-places the stored image elsewhere */
+				sq = (uint8_t *) malloc(6);
+				if (sq) {
+					memcpy(sq, "\033[2;4H", 6);
+					parse(&term, sq, 6);
+					free(sq);
+				}
+				sq = w_apc("a=p,i=1", "");
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) > 0, "W5 drained");
+				expect(strstr(got, "\033_Gi=1;OK") != NULL, "W5 place OK");
+				expect(w_px(&term, 1, 3)->has_pixmap
+						&& w_px(&term, 1, 3)->pixmap[2] == 0xFF,
+					"W5 replaced left red");
+				expect(w_px(&term, 1, 4)->has_pixmap
+						&& w_px(&term, 1, 4)->pixmap[0] == 0xFF,
+					"W5 replaced right blue");
+
+				/* W8: delete, then the id is gone */
+				sq = w_apc("a=d,d=i,i=1", "");
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				sq = w_apc("a=p,i=1", "");
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_drain(rp[0], got, sizeof got) > 0, "W8 drained");
+				expect(strstr(got, "ENOENT") != NULL, "W8 deleted id ENOENT");
+				u_teardown(&term);
+			}
+
+			/* W6: direct a=T (no virtual placement): paint at the cursor,
+			 * cursor ends cols right and lines below (spec placement
+			 * epilogue; also pins the multi-row case) */
+			{
+				uint8_t px[12 * 24 * 3];
+				char b64[2048];
+
+				for (size_t i = 0; i < 12 * 24; i++) {
+					px[i * 3 + 0] = 255; /* R first: f=24 is RGB */
+					px[i * 3 + 1] = 0;
+					px[i * 3 + 2] = 0;
+				}
+				st_b64enc(px, sizeof px, b64);
+				expect(u_setup(&term) == 0, "W6 alloc");
+				term.fd = rp[1];
+				term.color_pair.bg = 0;
+				sq = w_apc("i=7,a=T,s=12,v=24,f=24", b64);
+				parse(&term, sq, (int) strlen((const char *) sq));
+				free(sq);
+				expect(w_px(&term, 0, 0)->has_pixmap
+						&& w_px(&term, 0, 0)->pixmap[2] == 0xFF
+						&& w_px(&term, 1, 1)->has_pixmap
+						&& w_px(&term, 1, 1)->pixmap[2] == 0xFF,
+					"W6 2x2 cells red");
+				expect(active_screen(&term)->cursor.x == 2
+						&& active_screen(&term)->cursor.y == 1,
+					"W6 cursor right+down (clamped to last row)");
+
+				/* W7: f=32 RGBA alpha blended over the black background */
+				{
+					uint8_t apx[6 * 12 * 4];
+					char ab64[512];
+
+					for (size_t i = 0; i < 6 * 12; i++) {
+						apx[i * 4 + 0] = 255;
+						apx[i * 4 + 1] = 0;
+						apx[i * 4 + 2] = 0;
+						apx[i * 4 + 3] = 128;
+					}
+					st_b64enc(apx, sizeof apx, ab64);
+					u_teardown(&term); /* release the W6 fixture */
+					expect(u_setup(&term) == 0, "W7 alloc");
+					term.fd = rp[1];
+					term.color_pair.bg = 0;
+					sq = w_apc("i=9,a=T,s=6,v=12,f=32", ab64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					/* 255 * 128/255 + 0 * 127/255 = 128 */
+					expect(w_px(&term, 0, 0)->has_pixmap
+							&& w_px(&term, 0, 0)->pixmap[2] == 128,
+						"W7 alpha blended");
+					u_teardown(&term);
+				}
+
+				/* W9: an id whose high byte is >= 30 rides a diacritic OUTSIDE
+				 * U+0300..U+036F (table index 30 = U+0483); the placeholder
+				 * resolver must honour the whole rowcolumn table, not just the
+				 * Greek block, or the image never resolves */
+				{
+					uint8_t gpx[6 * 12 * 4];
+					char gb64[512];
+					uint8_t ph9[] = {
+						0x1B, '[', '3', '8', ';', '2', ';', '0',
+						';', '0', ';', '7', 'm',
+						0xF4, 0x8E, 0xBB, 0xAE, /* U+10EEEE */
+						0xCC, 0x85, 0xCC, 0x85, 0xD2, 0x83, /* d(0)d(0)d(30)=U+0483 */
+						'\n',
+						0x1B, '[', '3', '9', 'm',
+					};
+
+					for (int gi = 0; gi < 6 * 12; gi++) {
+						gpx[gi * 4 + 0] = 0;
+						gpx[gi * 4 + 1] = 255;
+						gpx[gi * 4 + 2] = 0;
+						gpx[gi * 4 + 3] = 255;
+					}
+					st_b64enc(gpx, sizeof gpx, gb64);
+					expect(u_setup(&term) == 0, "W9 alloc");
+					term.fd = rp[1];
+					term.color_pair.bg = 0;
+					sq = w_apc("i=503316487,a=T,U=1,f=32,t=d,s=6,v=12,c=1,r=1", gb64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W9 drained");
+					expect(strstr(got, "\033_Gi=503316487;OK") != NULL, "W9 OK reply");
+					parse(&term, ph9, (int) sizeof ph9);
+					expect(w_px(&term, 0, 0)->has_pixmap
+							&& w_px(&term, 0, 0)->pixmap[1] == 0xFF
+							&& w_px(&term, 0, 0)->pixmap[0] == 0x00
+							&& w_px(&term, 0, 0)->pixmap[2] == 0x00,
+						"W9 id high byte 30 resolves");
+					u_teardown(&term);
+				}
+
+				/* W10: every store-release path (single delete,
+				 * delete-all, grab reset) must vacate a slot with a
+				 * NULL img pointer; the next transfer's kg_store_put
+				 * reclaims that slot and must free(NULL), not a
+				 * dangling pointer (double-free under ASAN before
+				 * the fix) */
+				{
+					uint8_t ipx[4 * 4 * 4];
+					char ib64[512];
+
+					memset(ipx, 0xAB, sizeof ipx);
+					st_b64enc(ipx, sizeof ipx, ib64);
+					expect(u_setup(&term) == 0, "W10 alloc");
+					term.fd = rp[1];
+					term.color_pair.bg = 0;
+
+					/* store id 1, then single-delete it */
+					sq = w_apc("i=1,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 drained");
+					expect(strstr(got, "\033_Gi=1;OK") != NULL, "W10 stored");
+					sq = w_apc("i=1,a=d,d=i", "");
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 del drained");
+					expect(strstr(got, "\033_Gi=1;OK") != NULL, "W10 single delete ok");
+
+					/* the reclaimed slot receives the next transfer */
+					sq = w_apc("i=2,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 rec drained");
+					expect(strstr(got, "\033_Gi=2;OK") != NULL, "W10 reclaim ok");
+
+					/* delete-all (silent without i=), then reclaim */
+					sq = w_apc("a=d", "");
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					sq = w_apc("i=3,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 ra drained");
+					expect(strstr(got, "\033_Gi=3;OK") != NULL, "W10 reclaim after delete-all ok");
+
+					/* grab reset frees the store; transfer lands clean */
+					kitty_grab_reset(&term);
+					sq = w_apc("i=4,a=T,U=1,f=32,t=d,s=4,v=4,c=1,r=1", ib64);
+					parse(&term, sq, (int) strlen((const char *) sq));
+					free(sq);
+					expect(w_drain(rp[0], got, sizeof got) > 0, "W10 rs drained");
+					expect(strstr(got, "\033_Gi=4;OK") != NULL, "W10 reclaim after grab reset ok");
+					u_teardown(&term);
+				}
+			}
+			close(rp[1]);
+			rp[1] = -1;
+			close(rp[0]);
+			rp[0] = -1;
+		}
+		glyph_mmap_die();
 	}
 
 	if (failures) {

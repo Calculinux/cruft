@@ -30,6 +30,8 @@ cruft-256color|Calculinux reduced footprint terminal,
 
 	civis=\E[?25l, cnorm=\E[?25h,
 
+	smcup=\E[?1049h, rmcup=\E[?1049l,
+
 	ht=^I, hts=\EH, tbc=\E[3g,
 
 	sc=\E7, rc=\E8,

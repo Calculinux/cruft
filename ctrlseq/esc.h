@@ -2,9 +2,11 @@
 /* function for control character */
 void bs(struct terminal_t *term)
 {
+	struct screen_t *scr = active_screen(term);
+
 	if (term->mode & MODE_VWBS
-		&& term->cursor.x - 1 >= 0
-		&& term->cells[term->cursor.y][term->cursor.x - 1].width == NEXT_TO_WIDE)
+		&& scr->cursor.x - 1 >= 0
+		&& scr->cells[scr->cursor.y][scr->cursor.x - 1].width == NEXT_TO_WIDE)
 		move_cursor(term, 0, -2);
 	else
 		move_cursor(term, 0, -1);
@@ -12,25 +14,27 @@ void bs(struct terminal_t *term)
 
 void tab(struct terminal_t *term)
 {
+	struct screen_t *scr = active_screen(term);
 	int i;
 
-	for (i = term->cursor.x + 1; i < term->cols; i++) {
-		if (term->tabstop[i]) {
-			set_cursor(term, term->cursor.y, i);
+	for (i = scr->cursor.x + 1; i < term->cols; i++) {
+		if (scr->tabstop[i]) {
+			set_cursor(term, scr->cursor.y, i);
 			return;
 		}
 	}
-	set_cursor(term, term->cursor.y, term->cols - 1);
+	set_cursor(term, scr->cursor.y, term->cols - 1);
 }
 
 void nl(struct terminal_t *term)
 {
+	kitty_ph_newline(term);
 	move_cursor(term, 1, 0);
 }
 
 void cr(struct terminal_t *term)
 {
-	set_cursor(term, term->cursor.y, 0);
+	set_cursor(term, active_screen(term)->cursor.y, 0);
 }
 
 void enter_esc(struct terminal_t *term)
@@ -42,7 +46,7 @@ void enter_esc(struct terminal_t *term)
 void save_state(struct terminal_t *term)
 {
 	term->state.mode = term->mode & MODE_ORIGIN;
-	term->state.cursor = term->cursor;
+	term->state.cursor = active_screen(term)->cursor;
 	term->state.attribute = term->attribute;
 }
 
@@ -53,7 +57,7 @@ void restore_state(struct terminal_t *term)
 		term->mode |= MODE_ORIGIN;
 	else
 		term->mode &= ~MODE_ORIGIN;
-	term->cursor    = term->state.cursor;
+	active_screen(term)->cursor = term->state.cursor;
 	term->attribute = term->state.attribute;
 }
 
@@ -65,7 +69,9 @@ void crnl(struct terminal_t *term)
 
 void set_tabstop(struct terminal_t *term)
 {
-	term->tabstop[term->cursor.x] = true;
+	struct screen_t *scr = active_screen(term);
+
+	scr->tabstop[scr->cursor.x] = true;
 }
 
 void reverse_nl(struct terminal_t *term)
@@ -90,7 +96,8 @@ void enter_osc(struct terminal_t *term)
 
 void enter_dcs(struct terminal_t *term)
 {
-	term->esc.state = STATE_DCS;
+	term->esc.state    = STATE_DCS;
+	term->esc.dcs_kind = 0; /* ESC P: traditional body (sixel, DECDLD) */
 }
 
 void ris(struct terminal_t *term)

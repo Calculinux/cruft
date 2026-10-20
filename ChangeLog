@@ -149,3 +149,74 @@ $ make yaft
 	-	fb type shapes split out to fb/fb.h; margin painting leaves
 		the status strip to the bar
 	-	wall mode: per-line shadow flush honours the oy grid origin
+
+## 2026-10-13
+-	split per-screen state into struct screen_t scr[2]: cells, dirty
+	flags, tabstops, scroll margins, cursor and wrap flag; the
+	active_screen() accessor (cruft.h) is the single routing point
+-	reserve the alternate screen (scr[1]) for DECALT (1049): it stays
+	unallocated and lazy until first entry. Pure refactor, no behavior
+	change (selftest section R pins the routing)
+
+## 2026-10-13
+-	alternate screen (DECALT, CSI ?1049h/l): scr[1] allocated lazily
+	on first entry, kept between excursions, wiped on every entry;
+	the primary is frozen while the alt screen is resident (only the
+	cursor and scroll margins are parked); doubled/mismatched 1049
+	are no-ops; RIS ends the residence and drops the matrix
+-	terminfo: advertise smcup/rmcup so ncurses full-screen apps (vim,
+	htop, less) request the alt screen instead of painting over the
+	main buffer
+-	selftest links the real terminal.h (dropped the move_cursor
+	stub); section S covers the DECALT lifecycle end to end
+
+## 2026-10-13
+-	scrollback ring (scrollback.c): full-primary scroll-ups on the main
+	screen drain copied rows (deep-copied sixel pixmaps, 64 KiB payload
+	cap, oldest art degrades first); CRUFT_HISTORY depth (default 96,
+	clamp 1024, 0 = off), lazy per-row allocation
+-	history viewport: sb.view lifts stored rows above the live screen;
+	whole-window repaint while browsing (live dirty flags stay in live
+	renderer coordinates); Meta-Up/Down/Prior/Next/Home/End navigate
+	(CSI and SS3 forms), bare arrows pass through, any foreign key
+	snaps back to the live tail; alt screen keeps the keys for the app
+-	2px scrollbar in the right edge: first stored row anchors the grid
+	left (centred leftover moves right, 1px at 6x12/320), track/thumb
+	in the yielded strip; no strip where the font divides the width
+	exactly
+-	RIS clears the ring, DECALT entry ends browsing; DRCS charset free
+	scrubs history cells referencing the table (no dangling glyphs)
+-	selftest section T: feeding rules, eviction order, viewport
+	mapping, nav keys, pixmap cap, disabled mode
+
+## 2026-10-15
+-	version 0.2.9
+-	scrollback disk tier (sbdisk.c): CRUFT_HISTORY is now the TOTAL
+	depth across both tiers (default 96, clamp 16384); rows older
+	than the RAM tier (CRUFT_SB_RAM, default 512) spill to a
+	session file in /var/tmp (mkstemp, 0600, unlinked on exit)
+-	disk rows store as packed cells (bitmap, not glyph pointer)
+	through a (width, bitmap) intern table; per-record sixel budget
+	32 KiB; oldest-quarter compaction at the file cap; any
+	unreadable file degrades the tier silently (RAM keeps serving)
+-	viewport spans both tiers; a push while browsing stored rows
+	pins the window on the same rows; the scrollbar sizes with the
+	total depth
+-	nav keys: the native page forms (ESC [5~/[6~], Shift+Up /
+	Shift+Down on the PicoCalc) page the scrollback, and the
+	Ctrl+Home / Ctrl+End forms (ESC [1;5H / ESC [1;5F, bound in
+	the PicoCalc console keymap) jump to the oldest row / the
+	live tail
+-	selftest section U: spill/seam mapping, nav over the combined
+	depth, pin-on-push, compaction, pixmap survival on disk,
+	corruption degradation, unlink on reset/die
+
+## 2026-10-15
+-	version 0.2.10
+-	config file /etc/cruft.conf (conf.c): persistent defaults for
+	the CRUFT_FONT/CRUFT_SB/CRUFT_SB_FONT/CRUFT_SB_12H/
+	CRUFT_HISTORY/CRUFT_SB_RAM knobs; environment overrides the
+	file, the file the built-ins; unknown keys and malformed
+	values are skipped with a warning (the console never dies
+	on a bad config line)
+-	selftest section V: grammar, validity, environment precedence

@@ -2,16 +2,17 @@
 /* function for csi sequence */
 void insert_blank(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, num = sum(parm);
 
 	if (num <= 0)
 		num = 1;
 
-	for (i = term->cols - 1; term->cursor.x <= i; i--) {
-		if (term->cursor.x <= (i - num))
-			copy_cell(term, term->cursor.y, i, term->cursor.y, i - num);
+	for (i = term->cols - 1; scr->cursor.x <= i; i--) {
+		if (scr->cursor.x <= (i - num))
+			copy_cell(term, scr->cursor.y, i, scr->cursor.y, i - num);
 		else
-			erase_cell(term, term->cursor.y, i);
+			erase_cell(term, scr->cursor.y, i);
 	}
 }
 
@@ -82,7 +83,7 @@ void curs_col(struct terminal_t *term, struct parm_t *parm)
 	int num;
 
 	num = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]) - 1;
-	set_cursor(term, term->cursor.y, num);
+	set_cursor(term, active_screen(term)->cursor.y, num);
 }
 
 void curs_pos(struct terminal_t *term, struct parm_t *parm)
@@ -111,27 +112,31 @@ void curs_line(struct terminal_t *term, struct parm_t *parm)
 	int num;
 
 	num = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]) - 1;
-	set_cursor(term, num, term->cursor.x);
+	set_cursor(term, num, active_screen(term)->cursor.x);
 }
 
 void erase_display(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, j, mode;
 
 	mode = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]);
+
+	/* a wiped screen also kills any image placement laid over it */
+	kitty_ph_invalidate(term);
 
 	if (mode < 0 || 2 < mode)
 		return;
 
 	if (mode == 0) {
-		for (i = term->cursor.y; i < term->lines; i++)
+		for (i = scr->cursor.y; i < term->lines; i++)
 			for (j = 0; j < term->cols; j++)
-				if (i > term->cursor.y || (i == term->cursor.y && j >= term->cursor.x))
+				if (i > scr->cursor.y || (i == scr->cursor.y && j >= scr->cursor.x))
 					erase_cell(term, i, j);
 	} else if (mode == 1) {
-		for (i = 0; i <= term->cursor.y; i++)
+		for (i = 0; i <= scr->cursor.y; i++)
 			for (j = 0; j < term->cols; j++)
-				if (i < term->cursor.y || (i == term->cursor.y && j <= term->cursor.x))
+				if (i < scr->cursor.y || (i == scr->cursor.y && j <= scr->cursor.x))
 					erase_cell(term, i, j);
 	} else if (mode == 2) {
 		for (i = 0; i < term->lines; i++)
@@ -142,6 +147,7 @@ void erase_display(struct terminal_t *term, struct parm_t *parm)
 
 void erase_line(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, mode;
 
 	mode = (parm->argc <= 0) ? 0: dec2num(parm->argv[parm->argc - 1]);
@@ -150,75 +156,79 @@ void erase_line(struct terminal_t *term, struct parm_t *parm)
 		return;
 
 	if (mode == 0) {
-		for (i = term->cursor.x; i < term->cols; i++)
-			erase_cell(term, term->cursor.y, i);
+		for (i = scr->cursor.x; i < term->cols; i++)
+			erase_cell(term, scr->cursor.y, i);
 	} else if (mode == 1) {
-		for (i = 0; i <= term->cursor.x; i++)
-			erase_cell(term, term->cursor.y, i);
+		for (i = 0; i <= scr->cursor.x; i++)
+			erase_cell(term, scr->cursor.y, i);
 	} else if (mode == 2) {
 		for (i = 0; i < term->cols; i++)
-			erase_cell(term, term->cursor.y, i);
+			erase_cell(term, scr->cursor.y, i);
 	}
 }
 
 void insert_line(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int num = sum(parm);
 
 	if (term->mode & MODE_ORIGIN) {
-		if (term->cursor.y < term->scroll.top
-			|| term->cursor.y > term->scroll.bottom)
+		if (scr->cursor.y < scr->scroll.top
+			|| scr->cursor.y > scr->scroll.bottom)
 			return;
 	}
 
 	if (num <= 0)
 		num = 1;
 
-	scroll(term, term->cursor.y, term->scroll.bottom, -num);
+	scroll(term, scr->cursor.y, scr->scroll.bottom, -num);
 }
 
 void delete_line(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int num = sum(parm);
 
 	if (term->mode & MODE_ORIGIN) {
-		if (term->cursor.y < term->scroll.top
-			|| term->cursor.y > term->scroll.bottom)
+		if (scr->cursor.y < scr->scroll.top
+			|| scr->cursor.y > scr->scroll.bottom)
 			return;
 	}
 
 	if (num <= 0)
 		num = 1;
 
-	scroll(term, term->cursor.y, term->scroll.bottom, num);
+	scroll(term, scr->cursor.y, scr->scroll.bottom, num);
 }
 
 void delete_char(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, num = sum(parm);
 
 	if (num <= 0)
 		num = 1;
 
-	for (i = term->cursor.x; i < term->cols; i++) {
+	for (i = scr->cursor.x; i < term->cols; i++) {
 		if ((i + num) < term->cols)
-			copy_cell(term, term->cursor.y, i, term->cursor.y, i + num);
+			copy_cell(term, scr->cursor.y, i, scr->cursor.y, i + num);
 		else
-			erase_cell(term, term->cursor.y, i);
+			erase_cell(term, scr->cursor.y, i);
 	}
 }
 
 void erase_char(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, num = sum(parm);
 
 	if (num <= 0)
 		num = 1;
-	else if (num + term->cursor.x > term->cols)
-		num = term->cols - term->cursor.x;
+	else if (num + scr->cursor.x > term->cols)
+		num = term->cols - scr->cursor.x;
 
-	for (i = term->cursor.x; i < term->cursor.x + num; i++)
-		erase_cell(term, term->cursor.y, i);
+	for (i = scr->cursor.x; i < scr->cursor.x + num; i++)
+		erase_cell(term, scr->cursor.y, i);
 }
 
 uint8_t rgb2index(uint8_t r, uint8_t g, uint8_t b)
@@ -323,6 +333,8 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 		term->attribute     = ATTR_RESET;
 		term->color_pair.fg = DEFAULT_FG;
 		term->color_pair.bg = DEFAULT_BG;
+		term->tc_fg_on      = false;
+		term->tc_bg_on      = false;
 		return;
 	}
 
@@ -334,43 +346,83 @@ void set_attr(struct terminal_t *term, struct parm_t *parm)
 			term->attribute = ATTR_RESET;
 			term->color_pair.fg = DEFAULT_FG;
 			term->color_pair.bg = DEFAULT_BG;
+			term->tc_fg_on = term->tc_bg_on = false;
 		} else if (1 <= num && num <= 7) {     /* set attribute */
 			term->attribute |= attr_mask[num];
+		} else if (num == 22) {
+			/* Neither bold nor faint. Modern emitters (crossterm
+			 * ResetBold, ratatui style resets) lift bold with 22;
+			 * this product historically only took the VT340-style
+			 * 21 form, so bold leaked until SGR 0 or 39. */
+			term->attribute &= ~(attr_mask[ATTR_BOLD] | attr_mask[2]);
 		} else if (21 <= num && num <= 27) {   /* reset attribute */
 			term->attribute &= ~attr_mask[num - 20];
 		} else if (30 <= num && num <= 37) {   /* set foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = (num - 30);
 		} else if (num == 38) {                /* special foreground color selection */
 			/* select foreground color from 256 color index */
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
+				term->tc_fg_on = false;
 				term->color_pair.fg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select foreground color from specified rgb color */
+			/* select foreground color from specified rgb color. The cell
+			 * stores the stable quantized index (rgb2index), so a later
+			 * SGR can never recolor an existing cell; the exact value
+			 * parks in tc_fg (see set_attr notes in cruft.h) only so the
+			 * kitty placeholder id encoding - which is a truecolor SGR -
+			 * can be read back unquantized. */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
-				term->color_pair.fg = rgb2index(dec2num(parm->argv[i + 2]),
-					dec2num(parm->argv[i + 3]), dec2num(parm->argv[i + 4]));
+				int fr = dec2num(parm->argv[i + 2]);
+				int fg = dec2num(parm->argv[i + 3]);
+				int fb = dec2num(parm->argv[i + 4]);
+
+				term->tc_fg_rgb = ((((uint32_t) fr & 0xFF) << 16)
+						     | (((uint32_t) fg & 0xFF) << 8)
+						     | ((uint32_t) fb & 0xFF));
+				term->tc_fg_on    = true;
+				term->color_pair.fg = rgb2index((uint8_t) fr,
+								  (uint8_t) fg,
+								  (uint8_t) fb);
 				i += 4;
 			}
 		} else if (num == 39) {                /* reset foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = DEFAULT_FG;
 		} else if (40 <= num && num <= 47) {   /* set background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = (num - 40);
 		} else if (num == 48) {                /* special background  color selection */
 			/* select background color from 256 color index */
 			if ((i + 2) < parm->argc && dec2num(parm->argv[i + 1]) == 5) {
+				term->tc_bg_on = false;
 				term->color_pair.bg = dec2num(parm->argv[i + 2]);
 				i += 2;
-			/* select background color from specified rgb color */
+			/* select background color from specified rgb color (live value
+			 * kept for blends and id decoding, see the 38;2 case
+			 * above) */
 			} else if ((i + 4) < parm->argc && dec2num(parm->argv[i + 1]) == 2) {
-				term->color_pair.bg = rgb2index(dec2num(parm->argv[i + 2]),
-					dec2num(parm->argv[i + 3]), dec2num(parm->argv[i + 4]));
+				int br = dec2num(parm->argv[i + 2]);
+				int bgc = dec2num(parm->argv[i + 3]);
+				int bb = dec2num(parm->argv[i + 4]);
+
+				term->tc_bg_rgb = ((((uint32_t) br & 0xFF) << 16)
+						     | (((uint32_t) bgc & 0xFF) << 8)
+						     | ((uint32_t) bb & 0xFF));
+				term->tc_bg_on    = true;
+				term->color_pair.bg = rgb2index((uint8_t) br,
+								 (uint8_t) bgc,
+								 (uint8_t) bb);
 				i += 4;
 			}
 		} else if (num == 49) {                /* reset background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = DEFAULT_BG;
 		} else if (90 <= num && num <= 97) {   /* set bright foreground */
+			term->tc_fg_on = false;
 			term->color_pair.fg = (num - 90) + BRIGHT_INC;
 		} else if (100 <= num && num <= 107) { /* set bright background */
+			term->tc_bg_on = false;
 			term->color_pair.bg = (num - 100) + BRIGHT_INC;
 		}
 	}
@@ -386,7 +438,9 @@ void status_report(struct terminal_t *term, struct parm_t *parm)
 		if (num == 5) {         /* terminal response: ready */
 			ewrite(term->fd, "\033[0n", 4);
 		} else if (num == 6) {  /* cursor position report */
-			snprintf(buf, BUFSIZE, "\033[%d;%dR", term->cursor.y + 1, term->cursor.x + 1);
+			snprintf(buf, BUFSIZE, "\033[%d;%dR",
+				active_screen(term)->cursor.y + 1,
+				active_screen(term)->cursor.x + 1);
 			ewrite(term->fd, buf, strlen(buf));
 		} else if (num == 15) { /* terminal response: printer not connected */
 			ewrite(term->fd, "\033[?13n", 6);
@@ -396,9 +450,32 @@ void status_report(struct terminal_t *term, struct parm_t *parm)
 
 void device_attribute(struct terminal_t *term, struct parm_t *parm)
 {
-	/* TODO: refer VT525 DA */
+	/* DA1: VT220-class, sixel-capable (attribute 4 as read by
+	 * ratatui-image's capability probe, 6 the traditional sixel bit;
+	 * clients use it to auto-select a real image protocol) */
 	(void) parm;
-	ewrite(term->fd, "\033[?6c", 5); /* "I am a VT102" */
+	ewrite(term->fd, "\033[?62;4;6c", 10);
+}
+
+/* CSI Ps t: window operations - report only. Sizes in pixels, height
+ * first (xterm-style); capability probes (ratatui-image, kitty clients)
+ * rely on these to scale images into the cell grid. */
+void window_report(struct terminal_t *term, struct parm_t *parm)
+{
+	int i, num;
+	char buf[BUFSIZE];
+
+	for (i = 0; i < parm->argc; i++) {
+		num = dec2num(parm->argv[i]);
+		if (num == 14) { /* text area size */
+			snprintf(buf, BUFSIZE, "\033[4;%d;%dt",
+				term->lines * CELL_HEIGHT, term->width);
+			ewrite(term->fd, buf, strlen(buf));
+		} else if (num == 16) { /* single cell size */
+			snprintf(buf, BUFSIZE, "\033[16;%d;%dt", CELL_HEIGHT, CELL_WIDTH);
+			ewrite(term->fd, buf, strlen(buf));
+		}
+	}
 }
 
 void set_mode(struct terminal_t *term, struct parm_t *parm)
@@ -417,6 +494,8 @@ void set_mode(struct terminal_t *term, struct parm_t *parm)
 			term->mode |= MODE_AMRIGHT;
 		} else if (mode == 25) {
 			term->mode |= MODE_CURSOR;
+		} else if (mode == 1049) { /* DECALT: alternate buffer + cursor + margins */
+			enter_alt_screen(term);
 		} else if (mode == 8901) {
 			term->mode |= MODE_VWBS;
 		}
@@ -438,9 +517,11 @@ void reset_mode(struct terminal_t *term, struct parm_t *parm)
 			set_cursor(term, 0, 0);
 		} else if (mode == 7) {
 			term->mode &= ~MODE_AMRIGHT;
-			term->wrap_occurred = false;
+			active_screen(term)->wrap_occurred = false;
 		} else if (mode == 25) {
 			term->mode &= ~MODE_CURSOR;
+		} else if (mode == 1049) { /* DECALT */
+			leave_alt_screen(term);
 		} else if (mode == 8901) {
 			term->mode &= ~MODE_VWBS;
 		}
@@ -450,6 +531,7 @@ void reset_mode(struct terminal_t *term, struct parm_t *parm)
 
 void set_margin(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int top, bottom;
 
 	if (parm->argc <= 0) {        /* CSI r */
@@ -470,26 +552,27 @@ void set_margin(struct terminal_t *term, struct parm_t *parm)
 	if (top >= bottom)
 		return;
 
-	term->scroll.top = top;
-	term->scroll.bottom = bottom;
+	scr->scroll.top = top;
+	scr->scroll.bottom = bottom;
 
 	set_cursor(term, 0, 0); /* move cursor to home */
 }
 
 void clear_tabstop(struct terminal_t *term, struct parm_t *parm)
 {
+	struct screen_t *scr = active_screen(term);
 	int i, j, num;
 
 	if (parm->argc <= 0) {
-		term->tabstop[term->cursor.x] = false;
+		scr->tabstop[scr->cursor.x] = false;
 	} else {
 		for (i = 0; i < parm->argc; i++) {
 			num = dec2num(parm->argv[i]);
 			if (num == 0) {
-				term->tabstop[term->cursor.x] = false;
+				scr->tabstop[scr->cursor.x] = false;
 			} else if (num == 3) {
 				for (j = 0; j < term->cols; j++)
-					term->tabstop[j] = false;
+					scr->tabstop[j] = false;
 				return;
 			}
 		}

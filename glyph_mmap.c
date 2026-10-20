@@ -252,6 +252,22 @@ const struct glyph_t *glyph_sb_lookup(uint32_t code)
 	return map_lookup(&gsbfont, code);
 }
 
+int glyph_main_font_usable(const char *path)
+{
+	struct cruftfont_map m;
+	int ok;
+
+	if (path == NULL || path[0] == '\0')
+		return 0;
+	ok = cruftfont_map_init(&m, path, 1)
+	     && metrics_ok(m.cell_w, m.cell_h, m.glyph_bytes)
+	     && map_lookup(&m, 0x0020) != NULL
+	     && map_lookup(&m, 0x3000) != NULL
+	     && map_lookup(&m, 0x003F) != NULL;
+	map_unmap(&m);
+	return ok;
+}
+
 const struct glyph_t *glyph_get(uint32_t code)
 {
 	const struct glyph_t *g = glyph_lookup(code);

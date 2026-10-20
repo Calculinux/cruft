@@ -673,13 +673,15 @@ static int kgx_start(struct terminal_t *term, const struct kg_par *k)
 		/* f=100: the PNG carries its own size (s=/v= are ignored);
 		 * the compressed bytes are collected in a buffer that grows
 		 * with the chunks and decoded once at completion */
-		if (!kitty_png_available())
-			return -1;
+#ifdef HAVE_LIBPNG
 		first_red = 1;
 		cap = 0;
 		x->raw = NULL;
 		x->png = true;
 		x->w = x->h = 0;
+#else
+		return -1;
+#endif
 	} else {
 		if (!k->has_s || !k->has_v || k->s < 1 || k->v < 1)
 			return -1;
@@ -753,7 +755,7 @@ poison:
 /* Native-size 0x00RRGGBB image of a finished transfer (NULL on failure). */
 static uint32_t *kgx_build(struct terminal_t *term, uint32_t bg)
 {
-	struct kitty_xfer *x = &term->kgx;
+	const struct kitty_xfer *x = &term->kgx;
 	uint32_t *img;
 
 	if (!x->have || x->bad)
@@ -768,8 +770,8 @@ static uint32_t *kgx_build(struct terminal_t *term, uint32_t bg)
 			return NULL;
 		/* png_decode fits the image to the grid: the stored size is
 		 * the fitted one */
-		x->w = (unsigned) tw;
-		x->h = (unsigned) th;
+		term->kgx.w = (unsigned) tw;
+		term->kgx.h = (unsigned) th;
 		return img;
 	}
 #endif
@@ -1024,12 +1026,14 @@ void kitty_dcs_dispatch(struct terminal_t *term, const char *body)
 				kgx_complete(term);
 			return;
 		}
-		if (k.f == 100 && !kitty_png_available()) {
+#ifndef HAVE_LIBPNG
+		if (k.f == 100) {
 			if (k.has_i)
 				kg_reply_quiet(term, &k, (unsigned long) k.i, false,
 					       "ENOSYS:png unsupported in this build");
 			return;
 		}
+#endif
 		if (kgx_start(term, &k) < 0) {
 			if (k.has_i)
 				kg_reply_quiet(term, &k, (unsigned long) k.i, false,
